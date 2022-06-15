@@ -67,23 +67,6 @@ async function launchApp(msg) {
         
     BTFileText = msg.BTFileText;
     processBTFile();                                          // create table etc
-
-    // Get BT sub id => premium 
-    // BTId in local store and from org data should be the same. local store is primary
-    if (msg.bt_id) {
-	    BTId = msg.bt_id;
-	    if (!getMetaProp('BTId')) setMetaProp('BTId', BTId);
-	    else if (BTId != getMetaProp('BTId'))
-	        alert(`Conflicting subscription id's found! This should not happen. I'm using the local value, if there are issue contact BrainTool support.\nLocal value:${BTId}\nOrg file value:${getMetaProp('BTId')}`);
-    } else {
-	    // get from file if not in local storage and save locally (will allow for recovery if lost)
-	    if (getMetaProp('BTId')) {
-	        BTId = getMetaProp('BTId');
-	        Config.bt_id = BTId;
-	        window.postMessage({'function': 'localStore', 'data': {'BTId': BTId}});
-	        window.postMessage({'function': 'localStore', 'data': {'Config': Config}});
-	    }
-    }
     
     gtag('event', 'Launch', {'event_category': 'General', 'event_label': 'NumNodes', 'value': AllNodes.length});
 
@@ -105,13 +88,24 @@ async function launchApp(msg) {
     // scroll to top
     $('html, body').animate({scrollTop: '0px'}, 300);
 
-    // If GDrive connection was previously established, re-set it up on this startup
-    if (getMetaProp('BTGDriveConnected') == 'true') {
-        GDriveConnected = true;
-        authorizeGapi();
-        gtag('event', 'GDriveLaunch', {'event_category': 'General', 'event_label': 'NumNodes', 'value': AllNodes.length});
+    // If a backing store file was previously established, re-set it up on this startup
+    handleStartupFileConnection();
+
+    // Get BT sub id => premium 
+    // BTId in local store and from org data should be the same. local store is primary
+    if (msg.bt_id) {
+	    BTId = msg.bt_id;
+	    if (!getMetaProp('BTId')) setMetaProp('BTId', BTId);
+	    else if (BTId != getMetaProp('BTId'))
+	        alert(`Conflicting subscription id's found! This should not happen. I'm using the local value, if there are issue contact BrainTool support.\nLocal value:${BTId}\nOrg file value:${getMetaProp('BTId')}`);
     } else {
-        gtag('event', 'NonGDriveLaunch', {'event_category': 'General', 'event_label': 'NumNodes', 'value': AllNodes.length});
+	    // get from file if not in local storage and save locally (will allow for recovery if lost)
+	    if (getMetaProp('BTId')) {
+	        BTId = getMetaProp('BTId');
+	        Config.bt_id = BTId;
+	        window.postMessage({'function': 'localStore', 'data': {'BTId': BTId}});
+	        window.postMessage({'function': 'localStore', 'data': {'Config': Config}});
+	    }
     }
     
     // If bookmarks have been imported remove button from controls screen (its still under options)
@@ -145,44 +139,6 @@ async function launchApp(msg) {
     checkCompactMode();                           // drop note col if to narrow
 }
 
-async function updateSigninStatus(signedIn, error=false, userInitiated = false) {
-    // CallBack on GDrive signin state change
-    if (error) {
-        let msg = "Error Authenticating with Google. Google says:\n'";
-        msg += (error.details) ? error.details : JSON.stringify(error);
-        msg += "'\n1) Re-try the Authorize button. \n2) Restart. \nOr if this is a cookie issue be aware that Google uses cookies for authentication.\n";
-        msg += "Go to 'chrome://settings/cookies' and make sure third-party cookies are allowed for accounts.google.com. If it continues see \nbraintool.org/support";
-        alert(msg);
-        return;
-    }
-    if (signedIn) {
-        gtag('event', 'AuthComplete', {'event_category': 'GDrive'});
-        $("#gdrive_auth").hide();                           // Hide button and add 'active' text
-        $("#autoSaveLabel").text("Auto-saving is on");
-        $("#gdrive_save").show();
-        GDriveConnected = true;
-        refreshRefresh();
-        
-        // Upgrades from before 0.9 to 0.9+ need to load from GDrive before first save, and then resave
-        if (UpgradeInstall &&
-            (UpgradeInstall.startsWith('0.8') ||
-             UpgradeInstall.startsWith('0.7') ||
-             UpgradeInstall.startsWith('0.6')))
-        {
-            alert("From BrainTool 0.9 onwards Google Drive is optional. \nYou already enabled GDrive permissions so I'm reestablishing the connection...");
-            await refreshTable(true);                       // Read previous org from GDrive
-            saveBT();					    // save to record it's now synced
-        }
-	    if (userInitiated) saveBT();			    // also save if newly authorized
-    } else {
-        alert("GDrive connection lost");
-        $("#gdrive_save").hide();
-	    $("#refresh").hide();
-        $("#gdrive_auth").show();
-        $("#autoSaveLabel").text("Auto-saving is off");
-        GDriveConnected = false;
-    }
-}
 
 function addTip() {
     // add random entry from the tipsArray
@@ -201,15 +157,16 @@ function handleFocus(e) {
 }
 
 async function warnBTFileVersion(e) {
-    // warn in ui if there's a newer btfile on Drive
-    if (!getMetaProp('BTGDriveConnected')) return; 	    // only if gdrive connected
-    const warn = await checkBTFileVersion();
+    // warn in ui if there's a backing file and its newer than local data
+    
+    const warn = syncEnabled() && await checkBTFileVersion();
     if (!warn) {
 	    $("#stats_row").css('background-color', '');
 	    return;
     }
     
     $("#headerRefreshButton").show();
+    $("#refresh").prop("disabled", false);
     $("#saves_span").attr('data-wenk', 'Remote file is newer,\nconsider refreshing');
     $("#stats_row").css('background-color', '#ffcc00');
     console.log("Newer BTFile version on GDrive, sending gtag event and warning");
@@ -262,7 +219,8 @@ function toggleMenu(event) {
 	        $("#openingTips").hide();		     // if not already hidden
 
         // scroll-margin ensures the selection does not get hidden behind the header
-        $(".treetable tr").css("scroll-margin-top", "25px");
+        $(".treetable tr").css("scroll-margin-top", "50px");
+        $("#open_close_image").attr('src', 'resources/more.svg');
     } else {
         // Open
         toggleMenu.introMessageShown = true;         // leave tip showing and remember it showed
@@ -274,7 +232,8 @@ function toggleMenu(event) {
                 $("#open_close_span").removeClass("wenk--right");
                 $("#open_close_image").removeClass("animate_more");
             });
-        $(".treetable tr").css("scroll-margin-top", "375px");
+        $(".treetable tr").css("scroll-margin-top", "425px");
+        $("#open_close_image").attr('src', 'resources/close.png');
     }
 }
 function closeMenu() {
@@ -324,14 +283,15 @@ function updateStatsRow(modifiedTime = null) {
     $("#brain_span").attr('data-wenk', tagText);
     
     const saveTime = getDateString(modifiedTime);           // null => current time
-    $("#gdrive_save").html(`<i>Saved: ${saveTime}</i>`);
+    $("#file_stats").html(`<i>Saved: ${saveTime}</i>`);
     $("#saves_span").attr('data-wenk', `Last saved: \n${saveTime}`);
 
     if (GDriveConnected)                                    // set save icon to GDrive, not fileSave
-    {
         $("#saves").attr("src", "resources/drive_icon.png");
-	    $("#stats_row").css('background-color', '');
+    if (syncEnabled()) {
+	$("#stats_row").css('background-color', '');
         $("#headerRefreshButton").hide();
+	$("#refresh").prop("disabled", true);
     }
 }
 
@@ -362,8 +322,8 @@ var BTFileText = "";           // Global container for file text
 var OpenedNodes = [];          // attempt to preserve opened state across refresh
 
 
-async function refreshTable(fromGDrive = false) {
-    // Clear current state and redraw table. Used after an import or on a manual GDrive refresh request
+async function refreshTable(fromStore = false) {
+    // Clear current state and redraw table. Used after an import or on manual GDrive refresh request
 
     // First check to make sure we're not clobbering a pending write, see fileManager.
     if (savePendingP()) {
@@ -385,10 +345,11 @@ async function refreshTable(fromGDrive = false) {
 
     // Either get BTFileText from gDrive or use local copy. If GDrive then await its return
     try {
-        if (fromGDrive)
+        if (fromStore)
             await getBTFile();
         processBTFile();
         $("#headerRefreshButton").hide();
+	$("#refresh").prop("disabled", true);
     }
     catch (e) {
         console.warn('error in refreshTable: ', e.toString());
@@ -468,17 +429,8 @@ function processBTFile() {
     }, 200);
 
     updatePrefs();
-    if (GDriveConnected) refreshRefresh();
     $('body').removeClass('waiting');
     if (RefreshCB) RefreshCB();                      // may be a callback registered
-}
-
-function refreshRefresh() {
-    // set refresh button back on
-    console.log('Refreshing Refresh');
-    $("#refresh").show();
-    $("#refresh").prop("disabled", false);
-    $('body').removeClass('waiting');
 }
 
 
@@ -512,7 +464,11 @@ function initializeUI() {
     $("table.treetable tr").on("click", function (e) {
 	    // first check this is not openclose button, can't stop propagation
 	    if (e?.originalEvent?.target?.classList?.contains('openClose')) return;
-	    
+
+        // close menu overlay on click
+        if ($("#controls_screen").is(":visible")) toggleMenu();
+
+        // select the new row
         $("tr.selected").removeClass('selected');
         $(this).addClass("selected");
     });
@@ -562,9 +518,9 @@ function initializeUI() {
         }
     });
     
-    // Hide loading notice and show refresh button
+    // Hide loading notice and show sync/refresh buttons as appropriate
     $("#loading").hide();
-    if (GDriveConnected) $("#refresh").show();
+    updateSyncSettings(syncEnabled());
 
     // Copy buttonRow's html for potential later recreation (see below)
     if ($("#buttonRow")[0])
@@ -865,14 +821,15 @@ function storeTabs(data) {
     const tabAction = data.tabAction;
 
     // process topic info create topic hierarchy as needed. no topic => scratch
-    const [topicDN, keyword] = BTNode.processTopicString(topicString || "Scratch");
+    const [topicDN, keyword] = BTNode.processTopicString(topicString || "📝 Scratch");
     const topicNode = BTAppNode.findOrCreateFromTopicDN(topicDN);
     const ttNode = topicNode.getTTNode();
 
     // update shared memory for popup
     BTAppNode.generateTags();                     // NB should really only do this iff needed
     window.postMessage({'function': 'localStore', 'data':
-                        {'tags': Tags, 'mruTopic': topicDN, 'mruTime': new Date().toJSON()}});
+                        {'tags': Tags, 'mruTopic': topicDN, 'mruTime': new Date().toJSON(),
+                         'currentTag': topicNode.displayTag, 'currentText': note}});
 
     // process tabs to store
     const tabsData = data.tabsData.reverse();
@@ -912,9 +869,9 @@ function storeTabs(data) {
                                                  childIds.indexOf(b.id))));
     initializeUI();
     saveBT();
-    newNodes[0].getDisplayNode().scrollIntoView({block: 'center'});
+    changeSelected(newNodes[0]);                // select newly added node in tree
 
-    // Execute tab action (close, stick, group)
+    // Execute tab action (close or save)
     if (tabAction == 'CLOSE') {
         newNodes.forEach(node => node.closeTab());
         return;
@@ -1003,28 +960,8 @@ function tabActivated(data) {
         m1 = {'currentTag': '', 'currentText': '', 'currentTitle': ''};
     window.postMessage({'function': 'localStore', 'data': {...m1, ...m2}});
     
-    // Set Highlight to this node if in tree. see also similar code in keyHandler
-    let currentSelection = $("tr.selected")[0];
-    if (currentSelection) {
-        const prev = $(currentSelection).attr("data-tt-id");
-	    AllNodes[prev].unshowForSearch();
-    }
-    if (!node) return;						    // nothing else to do
-    if (node) {
-	    const tableNode =  node.getDisplayNode();
-	    if(!$(tableNode).is(':visible'))
-	        node.showForSearch();				    // unfold tree etc as needed
-	    currentSelection && $(currentSelection).removeClass('selected');
-	    $(tableNode).addClass('selected');
-
-        // Make sure row is visible
-        const topOfRow = $(node.getDisplayNode()).position().top;
-        const displayTop = $(document).scrollTop();
-        const height = $(window).height();
-        if ((topOfRow < displayTop) || (topOfRow > (displayTop + height - 100)))
-	        tableNode.scrollIntoView({block: 'center'});
-	    $("#search_entry").val("");				    // clear search box on nav
-    }	
+    // Set Highlight to this node
+    if (node) changeSelected(node);            // show in table
 }
 
 function tabGrouped(data) {
@@ -1047,7 +984,7 @@ function cleanTitle(text) {
 }
 
 function setNodeOpen(node) {
-    // utility - set node and parent to open, propagate upwards as needed above any collapsed nodes
+    // utility - show as open in browser, propagate upwards as needed above any collapsed nodes
 
     function propogateOpened(parentId) {
         // recursively pass upwards adding opened class if appropriate
@@ -1062,6 +999,32 @@ function setNodeOpen(node) {
     $("tr[data-tt-id='"+parentId+"']").addClass("opened");
     propogateOpened(parentId);
 }
+
+function changeSelected(node) {
+    // utility - make node visible and selected, unselected previous selection
+
+    // Unselect current selection
+    let currentSelection = $("tr.selected")[0];
+    if (currentSelection) {
+        const prev = $(currentSelection).attr("data-tt-id");
+	    AllNodes[prev].unshowForSearch();
+    }
+    if (!node) return;                          // nothing to select, we're done
+    
+	const tableNode =  node.getDisplayNode();
+	if(!$(tableNode).is(':visible'))
+	    node.showForSearch();				    // unfold tree etc as needed
+	currentSelection && $(currentSelection).removeClass('selected');
+	$(tableNode).addClass('selected');
+
+    // Make sure row is visible
+    const topOfRow = $(node.getDisplayNode()).position().top;
+    const displayTop = $(document).scrollTop();
+    const height = $(window).height();
+    if ((topOfRow < displayTop) || (topOfRow > (displayTop + height - 100)))
+	    tableNode.scrollIntoView({block: 'center'});
+	$("#search_entry").val("");				    // clear search box on nav
+}	
 
 
 /*** 
@@ -1306,14 +1269,15 @@ function deleteRow(e) {
     // Delete selected node/row.
     const appNode = getActiveNode(e);
     if (!appNode) return false;
+    const nodeId = appNode.id;
     const kids = appNode.childIds.length && appNode.isTag();         // Tag determines non link kids
     buttonHide();
 
     // If children nodes ask for confirmation
     if (!kids || confirm('Delete whole subtree?')) {
         $("table.treetable").treetable("removeNode", appNode.id);    // Remove from UI and treetable
-        deleteNode(appNode.id);
-    }   
+        deleteNode(nodeId);
+    }
 }
 
 function deleteNode(id) {
@@ -1628,15 +1592,14 @@ function updatePrefs() {
         window.postMessage({'function': 'localStore', 'data': {'ManagerHome': managerHome}});
     }
 
-    // Theme?
-    const theme = getMetaProp('BTTheme');
-    if (theme) {
-        const $radio = $('#theme_selector :radio[name=theme]');
-        $radio.filter(`[value=${theme}]`).prop('checked', true);
-        window.postMessage({'function': 'localStore', 'data': {'Theme': theme}});
-        // Change theme by setting attr on document which overide a set of vars. see top of bt.css
-        document.documentElement.setAttribute('data-theme', theme);
-    }        
+    // Theme saved or set from OS
+    const theme = getMetaProp('BTTheme') ||
+          (window?.matchMedia('(prefers-color-scheme: dark)').matches ? 'DARK' : 'LIGHT');
+    const $radio = $('#theme_selector :radio[name=theme]');
+    $radio.filter(`[value=${theme}]`).prop('checked', true);
+    window.postMessage({'function': 'localStore', 'data': {'Theme': theme}});
+    // Change theme by setting attr on document which overides a set of vars. see top of bt.css
+    document.documentElement.setAttribute('data-theme', theme);
 }
 
 // Register listener for radio button changes in Options
@@ -1645,7 +1608,7 @@ $(document).ready(function () {
         // Defined in btContentScript, so if undefined => some issue
         alert("Something went wrong. The BrainTool app is not connected to its Browser Extension!");
     }
-    $('#tabgroup_selector :radio').click(function () {
+    $('#tabgroup_selector :radio').change(function () {
         const oldVal = GroupingMode;
         const newVal = $(this).val();
         GroupingMode = newVal;
@@ -1656,15 +1619,15 @@ $(document).ready(function () {
         saveBT();
         groupingUpdate(oldVal, newVal);
     });
-    $('#panel_toggle :radio').click(function () {
+    $('#panel_toggle :radio').change(function () {
         const newHome = $(this).val();
         setMetaProp('BTManagerHome', newHome);
         // Let extension know
         window.postMessage({'function': 'localStore', 'data': {'ManagerHome': newHome}});
         saveBT();
-        alert("NB you need to close and reopen the Topic Manager to change themes");
+        alert("NB you need to close and reopen the Topic Manager to change its location");
     });
-    $('#theme_selector :radio').click(function () {
+    $('#theme_selector :radio').change(function () {
         const newTheme = $(this).val();
         setMetaProp('BTTheme', newTheme);
         document.documentElement.setAttribute('data-theme', newTheme);
@@ -1914,6 +1877,36 @@ window.addEventListener("keydown", function(e) {
     if(["ArrowUp","ArrowDown","Space", "Tab", "Enter"].indexOf(e.code) > -1) {
         e.preventDefault();
     }
+
+    // up/down nav here to allow for auto repeat
+    
+    const alt = e.altKey;
+    const code = e.code;
+    const navKeys = ["KeyN", "KeyP", "ArrowUp", "ArrowDown"];
+
+    // n or down arrow, p or up arrow for up/down (w/o alt)
+    let next, currentSelection = $("tr.selected")[0];
+    if (!alt && navKeys.includes(code)) {
+        if (currentSelection)
+            next = (code == "KeyN" || code == "ArrowDown") ?
+            $(currentSelection).nextAll(":visible").first()[0] :          // down or
+            $(currentSelection).prevAll(":visible").first()[0];           // up
+        else
+            // no selection => nav in from top or bottom
+            next = (code == "KeyN" || code == "ArrowDown") ?
+            $('#content').find('tr:visible:first')[0] :
+            $('#content').find('tr:visible:last')[0];
+        
+        if (!next) return;
+        if (currentSelection) $(currentSelection).removeClass('selected');
+        $(next).addClass('selected');
+        next.scrollIntoView({block: 'nearest'});	
+	    $("#search_entry").val("");			      // clear search box on nav
+        e.preventDefault();
+	    e.stopPropagation();
+        return;
+    }
+
 }, false);
 
 $(document).on("keyup", keyUpHandler);
@@ -1940,27 +1933,14 @@ function keyUpHandler(e) {
         undo();
     }
 
-    // n or down arrow, p or up arrow for up/down (w/o alt)
     let next, currentSelection = $("tr.selected")[0];
-    if (!alt && navKeys.includes(code)) {
-        if (currentSelection)
-            next = (code == "KeyN" || code == "ArrowDown") ?
-            $(currentSelection).nextAll(":visible").first()[0] :          // down or
-            $(currentSelection).prevAll(":visible").first()[0];           // up
-        else
-            // no selection => nav in from top or bottom
-            next = (code == "KeyN" || code == "ArrowDown") ?
-            $('#content').find('tr:visible:first')[0] :
-            $('#content').find('tr:visible:last')[0];
-        
-        if (!next) return;
-        if (currentSelection) $(currentSelection).removeClass('selected');
-        $(next).addClass('selected');
-        next.scrollIntoView({block: 'nearest'});	
-	    $("#search_entry").val("");			      // clear search box on nav
-        e.preventDefault();
-	    e.stopPropagation();
-        return;
+    // Pageup/down move selection to top visible row, nb slight delay for scroll to finish
+    if (currentSelection && (code == "PageUp" || code == "PageDown")) {
+        setTimeout(() => {
+            let topRow = Array.from($("#content tr")).find(r => r.getBoundingClientRect().y > 60);
+            $(currentSelection).removeClass('selected');
+            $(topRow).addClass('selected');
+        }, 100);
     }
 
     // s,r = Search, Reverse-search
@@ -2012,6 +1992,7 @@ function keyUpHandler(e) {
         const dropId = $(dropTr).attr('data-tt-id');
 	    const dropNode = AllNodes[dropId];
         if (dropNode) moveNode(node, dropNode, node.parentId);
+        currentSelection.scrollIntoView({block: 'nearest'});
         e.preventDefault();
         return;
     }
@@ -2055,9 +2036,13 @@ function keyUpHandler(e) {
     }
 
     // delete || backspace = delete
-    const keyString = e.key;
     if (code == "Backspace" || code == "Delete") {
+        // Find next (or prev if no next) row, delete, then select next
+        const next = $(currentSelection).nextAll(":visible").first()[0] ||
+              $(currentSelection).prevAll(":visible").first()[0];
         deleteRow(e);
+        $(next).addClass('selected');
+        next.scrollIntoView({block: 'nearest'});	
     }
 
     // opt enter = new child
@@ -2096,7 +2081,7 @@ function keyUpHandler(e) {
 
     // space = open tab/window
     if (code === "Space") {
-        node.openPage();
+        node.openPage(alt);
         e.preventDefault();
     }
 
@@ -2141,6 +2126,7 @@ function handleEditCardKeyup(e) {
         e.preventDefault();
         closeDialog(function () {editRow({type: 'internal', duration: 100});}, 100);        
     }
+    if (code === "Escape") closeDialog();         // escape out of edit
 };
 
 function undo() {

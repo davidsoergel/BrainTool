@@ -262,7 +262,8 @@ function toggleMenu(event) {
 	        $("#openingTips").hide();		     // if not already hidden
 
         // scroll-margin ensures the selection does not get hidden behind the header
-        $(".treetable tr").css("scroll-margin-top", "25px");
+        $(".treetable tr").css("scroll-margin-top", "50px");
+        $("#open_close_image").attr('src', 'resources/more.svg');
     } else {
         // Open
         toggleMenu.introMessageShown = true;         // leave tip showing and remember it showed
@@ -274,7 +275,8 @@ function toggleMenu(event) {
                 $("#open_close_span").removeClass("wenk--right");
                 $("#open_close_image").removeClass("animate_more");
             });
-        $(".treetable tr").css("scroll-margin-top", "375px");
+        $(".treetable tr").css("scroll-margin-top", "425px");
+        $("#open_close_image").attr('src', 'resources/close.png');
     }
 }
 function closeMenu() {
@@ -512,7 +514,11 @@ function initializeUI() {
     $("table.treetable tr").on("click", function (e) {
 	    // first check this is not openclose button, can't stop propagation
 	    if (e?.originalEvent?.target?.classList?.contains('openClose')) return;
-	    
+
+        // close menu overlay on click
+        if ($("#controls_screen").is(":visible")) toggleMenu();
+
+        // select the new row
         $("tr.selected").removeClass('selected');
         $(this).addClass("selected");
     });
@@ -865,7 +871,7 @@ function storeTabs(data) {
     const tabAction = data.tabAction;
 
     // process topic info create topic hierarchy as needed. no topic => scratch
-    const [topicDN, keyword] = BTNode.processTopicString(topicString || "Scratch");
+    const [topicDN, keyword] = BTNode.processTopicString(topicString || "📝 Scratch");
     const topicNode = BTAppNode.findOrCreateFromTopicDN(topicDN);
     const ttNode = topicNode.getTTNode();
 
@@ -1306,14 +1312,15 @@ function deleteRow(e) {
     // Delete selected node/row.
     const appNode = getActiveNode(e);
     if (!appNode) return false;
+    const nodeId = appNode.id;
     const kids = appNode.childIds.length && appNode.isTag();         // Tag determines non link kids
     buttonHide();
 
     // If children nodes ask for confirmation
     if (!kids || confirm('Delete whole subtree?')) {
         $("table.treetable").treetable("removeNode", appNode.id);    // Remove from UI and treetable
-        deleteNode(appNode.id);
-    }   
+        deleteNode(nodeId);
+    }
 }
 
 function deleteNode(id) {
@@ -1628,15 +1635,14 @@ function updatePrefs() {
         window.postMessage({'function': 'localStore', 'data': {'ManagerHome': managerHome}});
     }
 
-    // Theme?
-    const theme = getMetaProp('BTTheme');
-    if (theme) {
-        const $radio = $('#theme_selector :radio[name=theme]');
-        $radio.filter(`[value=${theme}]`).prop('checked', true);
-        window.postMessage({'function': 'localStore', 'data': {'Theme': theme}});
-        // Change theme by setting attr on document which overide a set of vars. see top of bt.css
-        document.documentElement.setAttribute('data-theme', theme);
-    }        
+    // Theme saved or set from OS
+    const theme = getMetaProp('BTTheme') ||
+          (window?.matchMedia('(prefers-color-scheme: dark)').matches ? 'DARK' : 'LIGHT');
+    const $radio = $('#theme_selector :radio[name=theme]');
+    $radio.filter(`[value=${theme}]`).prop('checked', true);
+    window.postMessage({'function': 'localStore', 'data': {'Theme': theme}});
+    // Change theme by setting attr on document which overides a set of vars. see top of bt.css
+    document.documentElement.setAttribute('data-theme', theme);
 }
 
 // Register listener for radio button changes in Options
@@ -1645,7 +1651,7 @@ $(document).ready(function () {
         // Defined in btContentScript, so if undefined => some issue
         alert("Something went wrong. The BrainTool app is not connected to its Browser Extension!");
     }
-    $('#tabgroup_selector :radio').click(function () {
+    $('#tabgroup_selector :radio').change(function () {
         const oldVal = GroupingMode;
         const newVal = $(this).val();
         GroupingMode = newVal;
@@ -1656,15 +1662,15 @@ $(document).ready(function () {
         saveBT();
         groupingUpdate(oldVal, newVal);
     });
-    $('#panel_toggle :radio').click(function () {
+    $('#panel_toggle :radio').change(function () {
         const newHome = $(this).val();
         setMetaProp('BTManagerHome', newHome);
         // Let extension know
         window.postMessage({'function': 'localStore', 'data': {'ManagerHome': newHome}});
         saveBT();
-        alert("NB you need to close and reopen the Topic Manager to change themes");
+        alert("NB you need to close and reopen the Topic Manager to change its location");
     });
-    $('#theme_selector :radio').click(function () {
+    $('#theme_selector :radio').change(function () {
         const newTheme = $(this).val();
         setMetaProp('BTTheme', newTheme);
         document.documentElement.setAttribute('data-theme', newTheme);
@@ -1914,6 +1920,36 @@ window.addEventListener("keydown", function(e) {
     if(["ArrowUp","ArrowDown","Space", "Tab", "Enter"].indexOf(e.code) > -1) {
         e.preventDefault();
     }
+
+    // up/down nav here to allow for auto repeat
+    
+    const alt = e.altKey;
+    const code = e.code;
+    const navKeys = ["KeyN", "KeyP", "ArrowUp", "ArrowDown"];
+
+    // n or down arrow, p or up arrow for up/down (w/o alt)
+    let next, currentSelection = $("tr.selected")[0];
+    if (!alt && navKeys.includes(code)) {
+        if (currentSelection)
+            next = (code == "KeyN" || code == "ArrowDown") ?
+            $(currentSelection).nextAll(":visible").first()[0] :          // down or
+            $(currentSelection).prevAll(":visible").first()[0];           // up
+        else
+            // no selection => nav in from top or bottom
+            next = (code == "KeyN" || code == "ArrowDown") ?
+            $('#content').find('tr:visible:first')[0] :
+            $('#content').find('tr:visible:last')[0];
+        
+        if (!next) return;
+        if (currentSelection) $(currentSelection).removeClass('selected');
+        $(next).addClass('selected');
+        next.scrollIntoView({block: 'nearest'});	
+	    $("#search_entry").val("");			      // clear search box on nav
+        e.preventDefault();
+	    e.stopPropagation();
+        return;
+    }
+
 }, false);
 
 $(document).on("keyup", keyUpHandler);
@@ -1940,27 +1976,14 @@ function keyUpHandler(e) {
         undo();
     }
 
-    // n or down arrow, p or up arrow for up/down (w/o alt)
     let next, currentSelection = $("tr.selected")[0];
-    if (!alt && navKeys.includes(code)) {
-        if (currentSelection)
-            next = (code == "KeyN" || code == "ArrowDown") ?
-            $(currentSelection).nextAll(":visible").first()[0] :          // down or
-            $(currentSelection).prevAll(":visible").first()[0];           // up
-        else
-            // no selection => nav in from top or bottom
-            next = (code == "KeyN" || code == "ArrowDown") ?
-            $('#content').find('tr:visible:first')[0] :
-            $('#content').find('tr:visible:last')[0];
-        
-        if (!next) return;
-        if (currentSelection) $(currentSelection).removeClass('selected');
-        $(next).addClass('selected');
-        next.scrollIntoView({block: 'nearest'});	
-	    $("#search_entry").val("");			      // clear search box on nav
-        e.preventDefault();
-	    e.stopPropagation();
-        return;
+    // Pageup/down move selection to top visible row, nb slight delay for scroll to finish
+    if (currentSelection && (code == "PageUp" || code == "PageDown")) {
+        setTimeout(() => {
+            let topRow = Array.from($("#content tr")).find(r => r.getBoundingClientRect().y > 60);
+            $(currentSelection).removeClass('selected');
+            $(topRow).addClass('selected');
+        }, 100);
     }
 
     // s,r = Search, Reverse-search
@@ -2012,6 +2035,7 @@ function keyUpHandler(e) {
         const dropId = $(dropTr).attr('data-tt-id');
 	    const dropNode = AllNodes[dropId];
         if (dropNode) moveNode(node, dropNode, node.parentId);
+        currentSelection.scrollIntoView({block: 'nearest'});
         e.preventDefault();
         return;
     }
@@ -2055,9 +2079,13 @@ function keyUpHandler(e) {
     }
 
     // delete || backspace = delete
-    const keyString = e.key;
     if (code == "Backspace" || code == "Delete") {
+        // Find next (or prev if no next) row, delete, then select next
+        const next = $(currentSelection).nextAll(":visible").first()[0] ||
+              $(currentSelection).prevAll(":visible").first()[0];
         deleteRow(e);
+        $(next).addClass('selected');
+        next.scrollIntoView({block: 'nearest'});	
     }
 
     // opt enter = new child
@@ -2096,7 +2124,7 @@ function keyUpHandler(e) {
 
     // space = open tab/window
     if (code === "Space") {
-        node.openPage();
+        node.openPage(alt);
         e.preventDefault();
     }
 
@@ -2141,6 +2169,7 @@ function handleEditCardKeyup(e) {
         e.preventDefault();
         closeDialog(function () {editRow({type: 'internal', duration: 100});}, 100);        
     }
+    if (code === "Escape") closeDialog();         // escape out of edit
 };
 
 function undo() {

@@ -73,7 +73,7 @@
       </div>
       <div id="controls_screen">
         <img id="logo_image" src="resources/logo.png"/>
-        <p id="welcome">Hello from BrainTool 0.9.9</p>
+        <p id="welcome">Hello from BrainTool 1.0.0</p>
         <p style="font-size: 12px; margin-top:0px; margin-bottom: 0px">Type 'h' for help. Check back here for random tips.
         </p>
         <p style="font-size: 12px; margin-top:0px"><a href="https://braintool.org/support/userGuide" target="_blank">User Guide.</a> <a href='https://braintool.org/support/releaseNotes' target="_blank">Release Notes.</a>
@@ -93,7 +93,7 @@
           <p>- NB The icon may hide under the jigsaw icon - browser top right.</p>
 	      <p>- Start by importing and organizing your bookmarks or go through open tabs and assign them to Topics.</p>
           <p>- Build on the example Topics. Delete anything you don't want.</p>
-          <p>- This Message board opens and closes via the 3 dots button, top left. A tip will be shown here on startup. See the <a href="https://braintool.org/support/userGuide" target="_blank">User Guide</a> for all tips.</p>
+          <p>- This Message board opens via the 3 dots button, top left, and shows tips and messages. See the <a href="https://braintool.org/support/userGuide" target="_blank">User Guide</a> for all tips.</p>
 	    </div>
         <div style="margin-top: 23px;"><b>TIP:</b></div>
 	    <p id="tip" style="margin-bottom: 33px">Loading...</p>
@@ -189,21 +189,33 @@
                   <label class="button_text" for="darkTheme">Dark</label>
                 </div>
             </td></tr>
-            
-            <tr >
-              <td style="text-align:left">
-                <span id="autoSaveLabel">GDrive Auto-save:</span><br/>
-                <p id="gdrive_save" style="display:none; margin: 0px; font-size:11px;"/>
+
+            <tr id="syncSettings" >
+              <td colspan="2" style="border-top: solid; border-color: darkgrey; padding-bottom: 0px">
+                <p style="margin:0px; float:left; padding-bottom:0px">Sync your BrainTool data:</p>
               </td>
+            </tr>
+            <tr id="saveToFile">
               <td style="text-align:left">
-                <button id="gdrive_auth" class="button_text general_button" style="border-radius: 3px 3px 3px 3px;" onClick="authorizeGapi(true)">Authorize</button>
-                <button id="refresh" class="button_text general_button" onclick="refreshTable(true)" style="display:none">Refresh from File</button>
+                <button id="file_auth" class="button_text general_button" style="border-radius: 3px 3px 3px 3px;" onClick="authorizeLocalFile(true)">To a Local File</button>
+              <td >
+                <button id="gdrive_auth" class="button_text general_button" style="border-radius: 3px 3px 3px 3px; width: 170px" onClick="authorizeGAPI(true)">To a Google Drive File</button>
+              </td>
+            </tr>
+            
+            <tr id="fileInfo" style="display:none">
+              <td style="text-align:left; border-top: solid; border-color: darkgrey;">
+                <span id="autoSaveLabel">Auto-save:</span><br/>
+                <p id="file_stats" style="margin: 0px; font-size:11px;"/>
+              </td>
+              <td style="text-align:left; border-top: solid; border-color: darkgrey;">
+                <button id="refresh" class="button_text general_button" onclick="refreshTable(true)">Refresh from File</button>
               </td>
             </tr>          
-            <tr class="subscription_buttons">
-	          <td>
-                <p style="margin:0px; float:left; padding-bottom:0px">Upgrade to <a href="https://braintool.org/pricing" target="_blank">Premium</a>:</p>		
-              </td><td></td></tr>
+            <tr class="subscription_buttons" style="border-top: solid; border-color: darkgrey">
+	          <td colspan="2" style="border-top: solid; border-color: darkgrey;">
+                <p style="margin:0px; float:left; padding-bottom:0px">Upgrade to Premium (more details <a href="https://braintool.org/pricing" target="_blank" style="color: blue">here</a>):</p>		
+            </td></tr>
             <tr class="subscription_buttons">
 	          <td style="padding-top:0px; padding-bottom:0px">
                 <button id="annual_sub" class="button_text general_button" style="border-radius: 3px 3px 3px 3px;" onclick="createSubscription(Annual)">$40/Yr</button>
@@ -255,16 +267,16 @@
               <td>Show tree nodes up to level N</td>
             </tr>
             <tr >
-              <td class="option_td, row_divider">Tab</td>
+              <td class="option_td row_divider">Tab</td>
               <td class="row_divider">Expand/Collapse the sub tree</td>
             </tr>
             <tr>
               <td rowspan="2" class="row_divider help_vertical_td">Browse&nbsp;</td>
-              <td class="option_td">Space</td>
-              <td>Show/open the associated tab or window</td>
+              <td class="option_td">Space (<span class="alt_opt">Option</span>-space)</td>
+              <td>Show/open item (new window)</td>
             </tr>
             <tr>
-              <td class="option_td, row_divider">Enter</td>
+              <td class="option_td row_divider">Enter</td>
               <td class="row_divider">Open/Close in the browser</td>
             </tr>
             <tr>
@@ -289,7 +301,7 @@
               <td>Delete selection</td>
             </tr>
             <tr>
-              <td class="option_td, row_divider"><span class="alt_opt">Option</span>-Enter</td>
+              <td class="option_td row_divider"><span class="alt_opt">Option</span>-Enter</td>
               <td class="row_divider">Create a new sub Topic</td>
             </tr>
             <tr>
@@ -332,7 +344,7 @@
           <img id="editRow" src="resources/edit.svg" class="rowButton"
                onClick="editRow(event)">
         </span>
-        <span data-wenk="Open in new window" class="wenk--left">
+        <span data-wenk="Open in new window (m-space)" class="wenk--left">
           <img id="openWindow" src="resources/openWindow.svg" class="rowButton"
                onClick="openRow(event, true)">
         </span>
@@ -387,14 +399,20 @@
         </table>
         <div class="buttonDiv">
           <button id="cancel" class="important_button editNode" style="width: 30%; background-color: #ff5555" tabindex="5" onClick="closeDialog(cancelEdit)">Cancel</button>
-          <button id="update" class="important_button editNode" style="width: 30%; background-color: #58BA00" tabindex="4" onClick="updateRow()">Update</button>
+          <button id="update" class="important_button editNode" style="width: 30%;" tabindex="4" onClick="updateRow()">Update</button>
         </div>
+      </dialog>
+      <dialog id="permissions" style="display:none">
+        <p>BrainTool needs to re-establish local file access.<br/>The browser will now ask for your permission.</p>
+        <button id="grant">OK</button>
       </dialog>
     </div>
     
     <script src="orga-bundlev2.js"></script>
     <script src="BTNode.js"></script>
     <script src="fileManager.js"></script>
+    <script src="gDriveFileManager.js"></script>
+    <script src="localFileManager.js"></script>
     <script src="bt.js"></script>
     <script src="BTAppNode.js"></script>
     <script src="parser.js"></script>
