@@ -6,17 +6,19 @@
  *
  ***/
 
-var config;
+'use strict';
+
+var Keys;
 try {
     importScripts('config.js');
 } catch (e) {
     console.log(e);
-    config = {CLIENT_ID: '', API_KEY: '', FB_KEY: '', STRIPE_KEY: ''};
+    Keys = {CLIENT_ID: '', API_KEY: '', FB_KEY: '', STRIPE_KEY: ''};
 }
 
-var LocalTest = false;                 // control code path during unit testing
-var InitialInstall = false;            // should we serve up the welcome page
-var UpdateInstall = false;                   // or the release notes page
+var LocalTest = false;                            // control code path during unit testing
+var InitialInstall = false;                       // should we serve up the welcome page
+var UpdateInstall = false;                        // or the release notes page
 
 async function getBTTabWin() {
     // read from local storage
@@ -33,15 +35,11 @@ function check(msg='') {
 
 /* Document data kept in storage.local */
 const storageKeys = ["BTFileText",                // golden source of BT .org text data
-                     "GroupingMode",              // window/group/none user pref
                      "TabAction",                 // remember popup default action
                      "currentTabId",
                      "currentTag",                // for setting badge text
                      "currentText",
-                     "groupTopic",                // topic name for current tabgroup, if any
-                     "windowTopic",               // topic for current window, if any
-                     "mruTime",                   // mru items used to default mru topic in popup
-                     "mruTopic",
+                     "mruTopics",                 // mru items used to default mru topic in popup
                      "newInstall",                // true/false, for popup display choice
                      "newVersion",                // used for popup to indicate an update to user
                      "permissions",               // perms granted
@@ -86,8 +84,11 @@ const Handlers = {
     "showNode": showNode,
     "brainZoom": brainZoom,
     "closeTab": closeTab,
+    "moveTab": moveTab,
     "ungroup": ungroup,
-    "groupAll": groupAll
+    "groupAll": groupAll,
+    "updateGroup": updateGroup,
+    "importSession": importSession
 };
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -104,7 +105,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
     if (msg.function == 'getBookmarks' || msg.function == 'exportBookmarks') {
         // request bookmark permission prior to bookmark operations
-        // NB not using the dispatch cos that looses that its user triggered and Chrome prevents
+        // NB not using the dispatch cos that loses that its user triggered and Chrome prevents
 
         if (LocalTest) {
             getBookmarks(); return;
@@ -136,6 +137,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
  *
  ***/
 
+chrome.tabs.onAttached.addListener(async (tabId, otherInfo) => {
+    // listen for tabs being closed and let BT know
+    const [BTTab, BTWin] = await getBTTabWin();
+    console.log('attached event:', otherInfo);
+});
+
+chrome.tabs.onMoved.addListener(async (tabId, otherInfo) => {
+    // listen for tabs being closed and let BT know
+    const [BTTab, BTWin] = await getBTTabWin();
+    const tab = await chrome.tabs.get(tabId);
+    const indicies = await tabIndices();
+    const prevIndex = otherInfo.fromIndex;
+    console.log('moved event:', otherInfo, tab);
+    chrome.tabs.sendMessage(
+        BTTab, {'function': 'tabPositioned', 'tabId': tabId, 'groupId': tab.groupId,
+                'tabIndex': tab.index, 'windowId': tab.windowId, 'tabIndices': indicies, 'tab': tab});
+    setTimeout(function() {setBadge(tabId);}, 200);
+});
+    
 chrome.tabs.onRemoved.addListener(async (tabId, otherInfo) => {
     // listen for tabs being closed and let BT know
     const [BTTab, BTWin] = await getBTTabWin();
@@ -144,16 +164,27 @@ chrome.tabs.onRemoved.addListener(async (tabId, otherInfo) => {
     if (tabId == BTTab) setTimeout(() => suspendExtension(), 100);
 });
 
-
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-    // listen for tabs navigating to and from BT URLs
+    // listen for tabs navigating to and from BT URLs or being moved to/from TGs
     const [BTTab, BTWin] = await getBTTabWin();
     if (!tabId || !BTTab || (tabId == BTTab)) return;                // not set up yet or don't care
-    //console.log(`TabUpdated ${tabId}, [${JSON.stringify(changeInfo)}], [${JSON.stringify(tab)}]`);
+    console.log(`TabUpdated ${tabId}, [${JSON.stringify(changeInfo)}], [${JSON.stringify(tab)}]`);
     if (changeInfo.status == 'complete') {
+        // tab navigated to/from url
         chrome.tabs.sendMessage(
             BTTab, {'function': 'tabUpdated', 'tabId': tabId, 'groupId': tab.groupId,
                     'tabURL': tab.url, 'windowId': tab.windowId});
+        setTimeout(function() {setBadge(tabId);}, 200);
+        return;
+    }
+    if (changeInfo.groupId && (tab.status != 'loading')) {
+        // tab moved to/from TG, wait til loaded so url etc is filled in
+        const tab = await chrome.tabs.get(tabId);
+        const indices = await tabIndices();
+        chrome.tabs.sendMessage(
+            BTTab, {'function': 'tabPositioned', 'tabId': tabId, 'groupId': tab.groupId,
+                    'tabIndex': tab.index, 'windowId': tab.windowId, 'tabIndices': indices,
+                    'tab': tab});
         setTimeout(function() {setBadge(tabId);}, 200);
     }
 });
@@ -168,6 +199,30 @@ chrome.tabs.onActivated.addListener(async (info) => {
                                         'windowId': tab.windowId, 'groupId': tab.groupId});
         setTimeout(function() {setBadge(info.tabId);}, 250);
     });
+});
+
+chrome.tabGroups.onCreated.addListener(async (tg) => {
+    // listen for TG creation and let app know color etc
+    const [BTTab, BTWin] = await getBTTabWin();
+    if (!BTTab) return;                                              // not set up yet or don't care
+    chrome.tabs.sendMessage(BTTab, {'function': 'tabGroupCreated', 'tabGroupId': tg.id,
+                                    'tabGroupColor': tg.color});
+});
+
+chrome.tabGroups.onUpdated.addListener(async (tg) => {
+    // listen for TG updates and let app know color etc
+    const [BTTab, BTWin] = await getBTTabWin();
+    if (!BTTab) return;                                              // not set up yet or don't care
+    chrome.tabs.sendMessage(BTTab, {'function': 'tabGroupUpdated', 'tabGroupId': tg.id,
+                                    'tabGroupColor': tg.color, 'tabGroupName': tg.title,
+                                    'tabGroupCollapsed': tg.collapsed});
+});
+
+chrome.tabGroups.onRemoved.addListener(async (tg) => {
+    // listen for TG deletion
+    const [BTTab, BTWin] = await getBTTabWin();
+    if (!BTTab) return;                                              // not set up yet or don't care
+    chrome.tabs.sendMessage(BTTab, {'function': 'tabGroupRemoved', 'tabGroupId': tg.id});
 });
 
 chrome.windows.onFocusChanged.addListener(async (windowId) => {
@@ -209,6 +264,20 @@ chrome.runtime.onConnect.addListener(async (port) => {
     });
 });
 
+// utility to return tabId: {tabIndex windowId} hash
+async function tabIndices() {
+    const tabs = await chrome.tabs.query({});
+    const indices = {};
+    tabs.forEach(t => indices[t.id] = {'index': t.index, 'windowId': t.windowId});
+    return indices;
+}
+
+/***
+ *
+ *  Functions that do the Apps bidding
+ *
+ ***/
+
 // breaking out single tab opened handling, might not be in tg
 async function tabOpened(winId, tabId, nodeId, index, tgId = 0) {
     const [BTTab, BTWin] = await getBTTabWin();
@@ -218,12 +287,6 @@ async function tabOpened(winId, tabId, nodeId, index, tgId = 0) {
                              'tabId': tabId, 'windowId': winId, 'tabGroupId': tgId});
     setTimeout(function() {setBadge(tabId);}, 250);
 }
-
-/***
- *
- *  Functions that do the Apps bidding
- *
- ***/
 
 function getOpenTabs() {
     // return an array of [{winId:, tabId:, groupId:, url:}..] via promise
@@ -236,9 +299,21 @@ function getOpenTabs() {
 				                       'groupId': tab.groupId,
 				                       'windowId': tab.windowId,
                                        'tabIndex' : tab.index,
+                                       'title': tab.title,
+                                       'pinned': tab.pinned,
+                                       'faviconUrl': tab.favIconUrl,
 				                       'url': tab.url}));
 	        resolve(allTabs);
 	    });
+    });
+}
+
+function getOpenTabGroups() {
+    // return array of [{windId, color, title, collapsed, id}]
+    return new Promise(resolve => {
+        chrome.tabGroups.query({}, (tgs) => {
+            resolve(tgs);
+        });
     });
 }
 
@@ -249,15 +324,16 @@ async function initializeExtension(msg, sender) {
     chrome.storage.local.set({'BTTab': BTTab, 'BTWin': BTWin});
 
     let allTabs = await getOpenTabs();
+    let allTGs = await getOpenTabGroups();
 	
     // send over gdrive app info
     chrome.tabs.sendMessage(                        
         BTTab,
-        {'function': 'launchApp', 'config': config, 'client_id': config.CLIENT_ID,
-	     'api_key': config.API_KEY, 'fb_key': config.FB_KEY,
-	     'stripe_key': config.STRIPE_KEY,
+        {'function': 'launchApp', 'client_id': Keys.CLIENT_ID,
+	     'api_key': Keys.API_KEY, 'fb_key': Keys.FB_KEY,
+	     'stripe_key': Keys.STRIPE_KEY,
          'initial_install': InitialInstall, 'upgrade_install': UpdateInstall,
-	     'all_tabs': allTabs});
+	     'all_tabs': allTabs, 'all_tgs': allTGs});
 
     // check to see if a welcome is called for. repeat popup setting on bt win for safety.
     if (InitialInstall || UpdateInstall) {
@@ -272,7 +348,7 @@ async function initializeExtension(msg, sender) {
 			               });
         InitialInstall = null; UpdateInstall = null;
     }
-    updateBTIcon('', 'BrainTool', '#5E954E');
+    updateBTIcon('', 'BrainTool', '#59718C');      // was #5E954E
     chrome.action.setIcon({'path': 'images/BrainTool128.png'});
 }
 
@@ -319,7 +395,7 @@ function updateBTIcon(text, title, color) {
 		{'color' : color});
 }
 
-function openTabs(msg, sender, tries=0) {
+function openTabs(msg, sender) {
     // open list of {nodeId, url} pairs, potentially in new window
     
     function openTabsInWin(tabInfo, winId = null) {
@@ -337,6 +413,7 @@ function openTabs(msg, sender, tries=0) {
     const newWin = msg.newWin;
     const defaultWinId = msg.defaultWinId;                                 // 0 or winId of siblings
     const [first, ...rest] = msg.tabs;
+    
     if (newWin)
         // Create new win w first url, then iterate on rest
         chrome.windows.create({'url': first.url}, win => {
@@ -344,8 +421,16 @@ function openTabs(msg, sender, tries=0) {
             openTabsInWin(rest, win.id);
         });
     else
-        // else just iterate on all adding to current window
-        openTabsInWin(msg.tabs, defaultWinId);                              
+        // else check window exists & iterate on all adding to current window
+        chrome.windows.get(defaultWinId, (w) => {
+            if (!w) {
+                // in rare error case win may no longer exist => set to null
+                console.warn(`Error in openTabs. ${chrome.runtime.lastError?.message}`);
+                openTabsInWin(msg.tabs);
+            } else {
+                openTabsInWin(msg.tabs, defaultWinId);
+            }
+        });
 }
 
 function openTabGroups(msg, sender) {
@@ -404,7 +489,6 @@ function openTabGroups(msg, sender) {
         };
     });
 }
-
 
 function groupAndPositionTabs(msg, sender) {
     // array of {nodeId, tabId, tabIndex} to group in tabGroupId and order
@@ -466,6 +550,11 @@ function groupAll(msg, sender) {
     });
 }
 
+function updateGroup(msg, sender) {
+    // expand/collapse or name change on topic in topic manager, reflect in browser
+    chrome.tabGroups.update(msg.tabGroupId, {'collapsed': msg.collapsed, 'title': msg.title});
+}
+
 function showNode(msg, sender) {
     // Surface the window/tab associated with this node
 
@@ -489,6 +578,21 @@ function closeTab(msg, sender) {
     chrome.tabs.remove(tabId, ()=> check()); // ignore error
 }
 
+async function moveTab(msg, sender) {
+    // move tab to window.index
+    try {
+        await chrome.tabs.move(msg.tabId, {'windowId': msg.windowId, 'index': msg.index});
+        if (msg.tabGroupId)
+            await chrome.tabs.group({'groupId': msg.tabGroupId, 'tabIds': msg.tabId});
+        console.log('Success moving tab.');
+    } catch (error) {
+        if (error == 'Error: Tabs cannot be edited right now (user may be dragging a tab).') {
+            setTimeout(() => moveTab(msg, sender), 50);
+        } else {
+            console.error(error);
+        }
+    }
+}
 
 var MarqueeEvent;                            // ptr to timeout event to allow cancellation
 
@@ -513,44 +617,14 @@ function setBadge(tabId) {
         } else {
             marquee(data.currentTag, 0);
             chrome.action.setTitle({'title' : data.currentText || 'BrainTool'});
-            chrome.action.setBadgeBackgroundColor({'color' : '#5E954E'});
+            chrome.action.setBadgeBackgroundColor({'color' : '#59718C'});
         }
     });
 }
 
-/* Experiment w Alex's icon options /
-function brainZoom(msg, sender, iteration = 0) {
-    const iterationArray = ['_BrainTool_Save_Animation_01_loop.gif',
-                   '_BrainTool_Save_Animation_02_loop.gif',
-                   '_BrainTool_Save_Animation_03_loop.gif'];
-
-    const path = 'images/'+iterationArray[iteration];
-    const default_icon = {
-        "16": "images/BrainTool16.png",
-        "32": "images/BrainTool32.png",
-        "48": "images/BrainTool48.png",
-        "128": "images/BrainTool128.png"
-    };
-    
-    if (iteration == iterationArray.length) {
-        chrome.browserAction.setIcon({'path': default_icon, 'tabId': msg.tabId});
-        setTimeout(function() {setBadge(msg.tabId);}, 150);
-        return;
-    }
-    console.log(path);
-    chrome.browserAction.setIcon({'path': path, 'tabId': msg.tabId}, () => {
-        // if action was Close tab might be closed by now
-        if (chrome.runtime.lastError)
-            console.log("!!Whoops, tab closed before Zoom.. " + chrome.runtime.lastError.message);
-        else
-            setTimeout(function() {brainZoom(msg, sender, ++iteration);}, 5000);
-    });
-}
-*/
-
 function brainZoom(msg, sender, iteration = 0) {
     // iterate thru icons to swell the brain
-    const iterationArray = [0,1,2,3,4,3,2,1,0];
+    const iterationArray = ['01','02', '03','04','05','06','07','08','09','10','05','04', '03','02','01'];
     const path = 'images/BrainZoom'+iterationArray[iteration]+'.png';
     const default_icon = {
         "16": "images/BrainTool16.png",
@@ -564,6 +638,7 @@ function brainZoom(msg, sender, iteration = 0) {
         setTimeout(function() {setBadge(msg.tabId);}, 150);
         return;
     }
+    chrome.action.setBadgeText({'text': '', 'tabId': msg.tabId});
     chrome.action.setIcon({'path': path, 'tabId': msg.tabId}, () => {
         // if action was Close tab might be closed by now
         if (chrome.runtime.lastError)
@@ -612,3 +687,35 @@ function exportBookmarks() {
     });
 }
 
+async function importSession(msg, sender) {
+    // return hierarchy of all windows/tgs/tabs to enable a topic tree to be created in Mgr
+
+    const [BTTab, BTWin] = await getBTTabWin();
+    const allTabs = await getOpenTabs();                             // array of tabs
+    const allTGs = await getOpenTabGroups();                         // array of tgs
+    const allWins = {}, groups = {};
+
+    allTGs.forEach(tg => {                                           // create hash
+        groups[tg.id] = tg;
+        tg.tabs = [];                                                // and add array for tabs
+    });
+
+    // Loop thru tabs, create win objs and fill in TGs and tabs
+    allTabs.forEach(t => {
+        if ((t.id == BTTab) || t.pinned) return;
+        if (!allWins[t.windowId])
+            allWins[t.windowId] = {'windowId': t.windowId, 'windowName': 'Window'+t.windowId,
+                                   'tabs': [], 'tabGroups': {}};
+        const win = allWins[t.windowId];
+        if (t.groupId > 0) {
+            const tg = groups[t.groupId];
+            if (!win.tabGroups[t.groupId])
+                win.tabGroups[t.groupId] = tg;
+            tg.tabs.push(t);
+        } else {
+            win.tabs.push(t);
+        }
+    });
+    chrome.tabs.sendMessage(BTTab, {'function': 'importSession', 'windows': allWins, 'topic': msg.topic, 'close': msg.close});
+    console.log('allWins = ', allWins);
+}

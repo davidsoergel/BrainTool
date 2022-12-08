@@ -67,12 +67,19 @@ const localFileManager = (() => {
             return promisifyRequest(store.transaction);
         });
     }
+    function clear(customStore = defaultGetStore()) {
+        return customStore('readwrite', (store) => {
+            store.clear();
+            return promisifyRequest(store.transaction);
+        });
+    }
     // ------------------------------------------------
 
     let LocalDirectoryHandle, LocalFileHandle;
     let savePending = false;
     async function saveBT(BTFileText) {
         // Save BT file to local file for which permission was granted
+        console.log('writing to local file');
         savePending = true;
         if (!LocalFileHandle)
             LocalFileHandle = await authorizeLocalFile();
@@ -84,8 +91,7 @@ const localFileManager = (() => {
         // Close the file and write the contents to disk.
         await writable.close();
         savePending = false;
-        Config.BTTimestamp = Date.now();
-		window.postMessage({'function': 'localStore', 'data': {'Config': Config}});
+        configManager.setProp('BTTimestamp', Date.now());
     }
 
     function savePendingP() {
@@ -118,18 +124,18 @@ const localFileManager = (() => {
             LocalFileHandle =
             await LocalDirectoryHandle.getFileHandle('BrainTool.org', { create: true });
         
+        LocalFileConnected = true;                             // used in fileManager facade
         if (fileExists &&
             confirm("BrainTool.org file already exists. Click OK to use its contents")) {
 		    await refreshTable(true);
-	} else {
-	    // else do a save to sync everything up
-	    const content = BTAppNode.generateOrgFile();
-	    saveBT(content);
-	}
+	    } else {
+	        // else do a save to sync everything up
+	        const content = BTAppNode.generateOrgFile();
+	        saveBT(content);
+	    }
         
         set('localFileHandle', LocalFileHandle);               // store for subsequent sessions
         set('localDirectoryHandle', LocalDirectoryHandle);     // store for subsequent sessions
-        
         return LocalFileHandle;
     }
 
@@ -151,10 +157,12 @@ const localFileManager = (() => {
             // wait for click on grant button
             let p = new Promise(function (resolve, reject) {
                 var listener = async () => {
+                    $("#editOverlay").off('click', listener);
                     await LocalFileHandle.requestPermission({mode: 'readwrite'});
                     resolve(event);
                 };
                 $("#grant").on('click', listener);
+                $("#editOverlay").on('click', listener);
             });
             await p;
 
@@ -165,6 +173,7 @@ const localFileManager = (() => {
         }
 
         // check if newer version on disk
+        LocalFileConnected = true;
         const newerOnDisk = await checkBTFileVersion();
         if (newerOnDisk && confirm("BrainTool.org file is newer on disk. Use newer?")) {
             try {
@@ -183,8 +192,7 @@ const localFileManager = (() => {
         const file = await LocalFileHandle.getFile();
         const contents = await file.text();
         
-		Config.BTTimestamp =  file.lastModified;
-	    window.postMessage({'function': 'localStore', 'data': {'Config': Config}});
+		configManager.setProp('BTTimestamp', file.lastModified);
         BTFileText = contents;
     }
 
@@ -200,7 +208,7 @@ const localFileManager = (() => {
         // is there a newer version of the btfile on Drive?
 
         const remoteVersion = await getFileLastModifiedTime() || 0;
-        const localVersion = Config.BTTimestamp || 0;
+        const localVersion = configManager.getProp('BTTimestamp') || 0;
         console.log(`Checking timestamps. local: ${localVersion}, remote: ${remoteVersion}`);
         return (remoteVersion > localVersion);
     }
@@ -211,11 +219,14 @@ const localFileManager = (() => {
 
     function reset() {
         // utility to clear out memory of localFileHandle
-        del('localFileHandle');
-        del('localDirectoryHandle');
+        clear();
+        //del('localFileHandle');
+        //del('localDirectoryHandle');
     }
 
     return {
+        set: set,
+        get: get,
         saveBT: saveBT,
         authorizeLocalFile: authorizeLocalFile,
         checkBTFileVersion: checkBTFileVersion,

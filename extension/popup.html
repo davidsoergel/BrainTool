@@ -21,7 +21,7 @@
 	    - The <b>Saver</b> where you save pages into your topic tree.</p>
       <img src="images/Overview.png" width="400"/>
       <p>
-	    Click the BrainTool icon (or use <span id="alt_opt">Alt</span>-b) to open the Saver to save the current page. Use the Topic Manager to open and close saved browser pages, singly or as a group.<br/>
+	    Click the BrainTool icon (or use Alt-b) to open the Saver to save the current page. Use the Topic Manager to open and close saved browser pages, singly or as a group.<br/>
         To get you started I'm going to:<br/>
 	    - Open the Topic Manager on the left of this window.<br/>
 	    - Slide this window right to accommodate. (Feel free to undo that later.)<br/>
@@ -41,12 +41,17 @@
         <hr style="margin-left: -11px;"/>
         <span id="saveSpan">
           <input type="checkbox" id="savePage" name="savePage" checked>
-          <label for="savePage">Save this page</label>
+          <label for="savePage">Save page</label>
         </span>
         <span id="saveAll">
           <input type="checkbox" id="saveAllPages" name="saveAllPages">
-          <label for="saveAllPages">Save all unsaved pages in this window</label>
+          <label for="saveAllPages">Save Window</label>
         </span>
+        <span id="saveSession">
+          <input type="checkbox" id="saveAllSession" name="saveAllSession">
+          <label for="saveAllSession">Save Session</label>
+        </span>
+        <div id="saveHint" class="hint hintText allPages">Pinned or already-saved tabs are not saved</div>
       </div>
       <hr/>
       

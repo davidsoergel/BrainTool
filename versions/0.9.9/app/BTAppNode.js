@@ -131,10 +131,26 @@ class BTAppNode extends BTNode {
      *
      ***/
 
+    favicon() {
+        // return img tag w pointer to favicon for url
+        if (!this.URL) return "";
+        try {
+            const favClass = (configManager.getProp('BTFavicons') == 'ON') ? 'faviconOn' : 'faviconOff';
+            const domain = new URL(this.URL).hostname;
+            return `<img src="http://www.google.com/s2/favicons?domain=${domain}" loading="lazy" class="${favClass}">`;
+            //return `<img src="https://icons.duckduckgo.com/ip3/${domain}.ico"/>`;
+        }
+        catch(err) {
+            console.warn(`error parsing url for favicon. \n URL:[${this.URL}]. \n Err: ${err}`);
+            return "";
+        }
+    }
+    
     HTML() {
         // Generate HTML for this nodes table row
         let outputHTML = "";
 	    let childlessTop = "";
+        let favicon = (this.isTopic())? "" : this.favicon();
         outputHTML += `<tr data-tt-id='${this.id}' `;
         if (this.parentId || this.parentId === 0)
             outputHTML += `data-tt-parent-id='${this.parentId}'`;
@@ -143,7 +159,7 @@ class BTAppNode extends BTNode {
 
         outputHTML += (this.isTopic()) ? "class='topic'" : "";
 	    
-        outputHTML += `><td class='left ${childlessTop}'><span class='btTitle'>${this.displayTitle()}</span></td>`;
+        outputHTML += `><td class='left ${childlessTop}'>${favicon}<span class='btTitle'>${this.displayTitle()}</span></td>`;
         outputHTML += `<td class='right'><span class='btText'>${this.displayText()}</span></td></tr>`;
         return outputHTML;
     }
@@ -210,6 +226,7 @@ class BTAppNode extends BTNode {
 	    const dn = this.getDisplayNode();
 	    $(dn).find("span.btTitle").html(this.displayTitle());
 	    $(dn).find("span.btText").html(this.displayText());
+	    $(dn).find("span.btText").scrollTop(0);           // might have scrolled down for search
 	    $(dn).find("a").each(function() {				  // reset link click intercept
 	        this.onclick = handleLinkClick;
 	    });
@@ -221,7 +238,7 @@ class BTAppNode extends BTNode {
     showForSearch() {
 	    // show this node in the tree cos its the search hit (might be folded)
 	    const disp = this.getDisplayNode();
-	    if(!$(disp).is(':visible')) {
+	    if(disp && !$(disp).is(':visible')) {
 	        if (this.parentId) AllNodes[this.parentId].showForSearch();    // btnode show
 	        $(disp).show();                                                // jquery node show
 	        this.shownForSearch = true;
@@ -345,6 +362,10 @@ class BTAppNode extends BTNode {
         // open this nodes url
         if (!this.URL || this._opening) return;
 
+        // record stats
+        gtag('event', 'openRow', {'event_category': 'TabOperation'});
+        configManager.incrementStat('BTNumTabOperations');
+
         // if this node is a link to a topic tree load it up
         if (this.isTopicTree()) {
             if (!this.childIds.length || confirm('Re-add this topic tree?'))
@@ -370,6 +391,10 @@ class BTAppNode extends BTNode {
 
     openAll(newWin = false) {
         // open this node and any children. NB order taken care of by tabOpened -> groupAndPosition
+
+        // record stats
+        gtag('event', 'openAll', {'event_category': 'TabOperation'});
+        configManager.incrementStat('BTNumTabOperations');
 
         // if we don't care about grouping just open each tab
         if (GroupingMode == 'NONE') {
@@ -397,13 +422,15 @@ class BTAppNode extends BTNode {
             tabInfo.push({'nodeId': id, 'tabId': node.tabId, 'tabIndex': index});
         });
         window.postMessage({'function': 'groupAndPositionTabs', 'tabGroupId': this.tabGroupId,
-                            'windowId': this.windowId, 'tabInfo': tabInfo});
+                            'windowId': this.windowId, 'tabInfo': tabInfo,
+                            'groupName': this.displayTag});
     }
     
     putInGroup() {
         // wrap this one nodes tab in a group
         if (!this.tabId || !this.windowId) return;
-        window.postMessage({'function': 'groupAll',
+        const groupName = this.isTopic() ? this.displayTag : AllNodes[this.parentId]?.displayTag;
+        window.postMessage({'function': 'groupAll', 'groupName': groupName,
                             'tabIds': [this.tabId], 'windowId': this.windowId});
     }
     
@@ -432,8 +459,8 @@ class BTAppNode extends BTNode {
             if (n.hasOpenChildren()) {
                 const openTabIds = n.childIds.flatMap(
                     c => AllNodes[c].tabId ? [AllNodes[c].tabId] :[]);
-                window.postMessage({'function': 'groupAll', 'tabIds': openTabIds,
-                                    'windowId': n.windowId});
+                window.postMessage({'function': 'groupAll', 'groupName': n.displayTag,
+                                    'tabIds': openTabIds, 'windowId': n.windowId});
             }
         });
     }
@@ -551,9 +578,13 @@ class BTAppNode extends BTNode {
         while (hits = reg.exec(outputStr)) {
             const h2 = (hits[2]=="undefined") ? hits[1] : hits[2];
             if (hits[1].indexOf('id:') == 0)             // internal org links get highlighted, but not as hrefs
-                outputStr = outputStr.substring(0, hits.index) + "<span class='file-link'>" + h2 + "</span>" + outputStr.substring(hits.index + hits[0].length);
-            else                
-                outputStr = outputStr.substring(0, hits.index) + "<a href='" + hits[1] + "' class='btlink'>" + h2 + "</a>" + outputStr.substring(hits.index + hits[0].length);
+                outputStr = outputStr.substring(0, hits.index) +
+                "<span class='file-link'>" + h2 + "</span>" +
+                outputStr.substring(hits.index + hits[0].length);
+            else
+                outputStr = outputStr.substring(0, hits.index) +
+                "<a href='" + hits[1] + "' class='btlink'>" + h2 + "</a>" +
+                outputStr.substring(hits.index + hits[0].length);
         }
         return outputStr;
     }
@@ -788,6 +819,20 @@ class BTLinkNode extends BTAppNode {
     }
     get protocol() {
         return this._protocol;
+    }
+
+    get text() {
+        return this._text;
+    }
+    
+    set text(txt) {
+        // When text is added this link is promoted to a headline. To prevent a dup link
+        // on next read replace the [[url][ttl]] in parent text with [url][ttl]
+        // so that it no longer has link syntax.
+        const parent = AllNodes[this.parentId];
+        const nonLink = this._title.slice(1, -1);
+        parent.text = parent.text.replace(this._title, nonLink);
+        this._text = txt;
     }
 
     orgTextwChildren() {

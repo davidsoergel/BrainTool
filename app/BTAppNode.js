@@ -60,6 +60,7 @@ class BTAppNode extends BTNode {
     }
     set tabGroupId(id) {
         this._tabGroupId = id;
+        if (!id) this.setTGColor(null);                   // clean up any color classes
     }
     get tabGroupId() {
         return this._tabGroupId;
@@ -124,13 +125,22 @@ class BTAppNode extends BTNode {
     needsTab() {
         return (this.URL && !this.tabId);
     }
+    openWindowIds() {
+        // arrya of open window Ids
+        const open = this.childIds.filter(id => AllNodes[id].windowId);
+        return open.map(id => AllNodes[id].windowId);
+    }
+    findAnOpenNode() {
+        // return a childId w an open tabgroup
+        return this.childIds.find(id => AllNodes[id].windowId);
+    }
 
     /***
      *
      * UI Management
      *
      ***/
-
+    
     HTML() {
         // Generate HTML for this nodes table row
         let outputHTML = "";
@@ -210,6 +220,7 @@ class BTAppNode extends BTNode {
 	    const dn = this.getDisplayNode();
 	    $(dn).find("span.btTitle").html(this.displayTitle());
 	    $(dn).find("span.btText").html(this.displayText());
+	    $(dn).find("span.btText").scrollTop(0);           // might have scrolled down for search
 	    $(dn).find("a").each(function() {				  // reset link click intercept
 	        this.onclick = handleLinkClick;
 	    });
@@ -217,11 +228,65 @@ class BTAppNode extends BTNode {
 	    if (this.childIds.length)                         // set correctly
 	        $(dn).children('.left').removeClass('childlessTop');
     }
+
+    setTGColor(color = null) {
+        // set color to sync w Tabgroup color
+        const displayNode = this.getDisplayNode();
+        if (!displayNode) return;
+        this.tgColor = color;                      // remember color thru a refresh
+        const colorClass = color ? 'tg'+color : null;
+        const selector = this.isTopic() ? ".btTitle" : ".btTitle a";
+
+        // remove any prev color and add new color or no longer shown in tg -> remove class
+        $(displayNode).find(selector).removeClass(
+            ['tggrey', 'tgblue', 'tgred', 'tgyellow', 'tggreen', 'tgpink',
+             'tgpurple', 'tgcyan', 'tgorange']);
+        if (color)
+            $(displayNode).find(selector).addClass(['tabgroup', colorClass]);
+        else
+            $(displayNode).find(selector).removeClass('tabgroup');
+
+        // iterate to contained nodes
+        this.childIds.forEach(id => {
+            const node = AllNodes[id];
+            if (node.tabId) node.setTGColor(color);
+        });
+    }
+
+    async populateFavicon() {
+        // add favicon icon either from local storage or goog
+        if (this.isTopic() || !this.URL) return;
+        const host = this.URL.split(/[?#]/)[0];
+        const favClass = (configManager.getProp('BTFavicons') == 'ON') ? 'faviconOn' : 'faviconOff';
+        const favUrl =
+              this.faviconUrl ||
+              await localFileManager.get(host) ||
+              `https://www.google.com/s2/favicons?domain=${host}`;
+        this.faviconUrl = favUrl;
+        const dn = this.getDisplayNode();
+        $(dn).find(`.${favClass}`).remove();                     // remove any previous set icon
+        const fav = $(`<img src="${favUrl}" loading="lazy" class="${favClass}">`);
+        $(fav).insertBefore($(dn).find('.btTitle'));
+    }
+
+    static async populateFavicons() {
+        // iterate thru nodes adding favicon icon either from local storage or goog
+        AllNodes.forEach(async n => {
+            if (!n || n.isTopic() || !n.URL) return;
+            n.populateFavicon();
+        });
+    }
+
+    /***
+     *
+     * Search support
+     *
+     ***/
     
     showForSearch() {
 	    // show this node in the tree cos its the search hit (might be folded)
 	    const disp = this.getDisplayNode();
-	    if(!$(disp).is(':visible')) {
+	    if(disp && !$(disp).is(':visible')) {
 	        if (this.parentId) AllNodes[this.parentId].showForSearch();    // btnode show
 	        $(disp).show();                                                // jquery node show
 	        this.shownForSearch = true;
@@ -345,6 +410,10 @@ class BTAppNode extends BTNode {
         // open this nodes url
         if (!this.URL || this._opening) return;
 
+        // record stats
+        gtag('event', 'openRow', {'event_category': 'TabOperation'});
+        configManager.incrementStat('BTNumTabOperations');
+
         // if this node is a link to a topic tree load it up
         if (this.isTopicTree()) {
             if (!this.childIds.length || confirm('Re-add this topic tree?'))
@@ -371,6 +440,10 @@ class BTAppNode extends BTNode {
     openAll(newWin = false) {
         // open this node and any children. NB order taken care of by tabOpened -> groupAndPosition
 
+        // record stats
+        gtag('event', 'openAll', {'event_category': 'TabOperation'});
+        configManager.incrementStat('BTNumTabOperations');
+
         // if we don't care about grouping just open each tab
         if (GroupingMode == 'NONE') {
             const tabsToOpen = this.listOpenableTabs();              // [{nodeId, url}..}
@@ -389,9 +462,13 @@ class BTAppNode extends BTNode {
         if (!this.isTopic() || (GroupingMode != 'TABGROUP')) return;
         let tabInfo = [];
         const myWin = this.windowId;
+        const myTG = this.tabGroupId;
         this.childIds.forEach(id => {
             const node = AllNodes[id];
-            if (!node.tabId || (node.windowId && node.windowId != myWin)) return;
+            if (!node.tabId ||
+                (node.windowId && node.windowId != myWin) ||
+                (node.tabGroupId && node.tabGroupId != myTG))
+                return;
             
             const index = node?.expectedTabIndex() || 0;
             tabInfo.push({'nodeId': id, 'tabId': node.tabId, 'tabIndex': index});
@@ -404,7 +481,7 @@ class BTAppNode extends BTNode {
     putInGroup() {
         // wrap this one nodes tab in a group
         if (!this.tabId || !this.windowId) return;
-        const groupName = this.isTopic() ? this.displayTag : AllNodes[this.parentId].displayTag;
+        const groupName = this.isTopic() ? this.displayTag : AllNodes[this.parentId]?.displayTag;
         window.postMessage({'function': 'groupAll', 'groupName': groupName,
                             'tabIds': [this.tabId], 'windowId': this.windowId});
     }
@@ -418,7 +495,23 @@ class BTAppNode extends BTNode {
             node.closeTab();
         });
     }
-    
+
+    createTabGroup() {
+        // create tg from topic node w children
+        if (!this.hasOpenChildren()) return;
+        const openTabIds = this.childIds.flatMap(
+            c => AllNodes[c].tabId ? [AllNodes[c].tabId] :[]);
+        window.postMessage({'function': 'groupAll', 'groupName': this.displayTag,
+                            'tabIds': openTabIds, 'windowId': this.windowId});
+    }
+
+    updateTabGroup() {
+        // set TG in browser to appropriate name/folded state
+        if (this.tabGroupId && this.isTopic())
+            window.postMessage({'function': 'updateGroup', 'tabGroupId': this.tabGroupId,
+                                'collapsed': this.folded, 'title': this.title});
+    }
+        
     static ungroupAll() {
         // user has changed from TABGROUP to NONE, tell background to ungroup all BT tabs
         const tabIds = AllNodes.flatMap(n => n.tabId ? [n.tabId] : []);
@@ -434,8 +527,8 @@ class BTAppNode extends BTNode {
             if (n.hasOpenChildren()) {
                 const openTabIds = n.childIds.flatMap(
                     c => AllNodes[c].tabId ? [AllNodes[c].tabId] :[]);
-                window.postMessage({'function': 'groupAll', 'tabIds': openTabIds,
-                                    'windowId': n.windowId});
+                window.postMessage({'function': 'groupAll', 'groupName': n.displayTag,
+                                    'tabIds': openTabIds, 'windowId': n.windowId});
             }
         });
     }
@@ -553,9 +646,13 @@ class BTAppNode extends BTNode {
         while (hits = reg.exec(outputStr)) {
             const h2 = (hits[2]=="undefined") ? hits[1] : hits[2];
             if (hits[1].indexOf('id:') == 0)             // internal org links get highlighted, but not as hrefs
-                outputStr = outputStr.substring(0, hits.index) + "<span class='file-link'>" + h2 + "</span>" + outputStr.substring(hits.index + hits[0].length);
-            else                
-                outputStr = outputStr.substring(0, hits.index) + "<a href='" + hits[1] + "' class='btlink'>" + h2 + "</a>" + outputStr.substring(hits.index + hits[0].length);
+                outputStr = outputStr.substring(0, hits.index) +
+                "<span class='file-link'>" + h2 + "</span>" +
+                outputStr.substring(hits.index + hits[0].length);
+            else
+                outputStr = outputStr.substring(0, hits.index) +
+                "<a href='" + hits[1] + "' class='btlink'>" + h2 + "</a>" +
+                outputStr.substring(hits.index + hits[0].length);
         }
         return outputStr;
     }
@@ -654,16 +751,19 @@ class BTAppNode extends BTNode {
         parent.childIds.some(id => {
             if (id == thisid) return true;           // exit when we get to this node
             let n = AllNodes[id];
-            if (n && n.tabId) index++;
+            if (n && n.tabId && (n.windowId == this.windowId)) index++;
         });
         return index;
     }
 
     leftmostOpenTabIndex() {
-        // used for ordering w tabGroups
-
-        const leftId = this.childIds.find(id => AllNodes[id].tabId);
-        return (leftId && AllNodes[leftId].tabIndex) ? AllNodes[leftId].tabIndex : 0;
+        // used for ordering w tabGroups, find min tabIndex
+        const leftIndex = this.childIds.reduce(
+            (a, b) => Math.min(a, ((AllNodes[b].windowId == this.windowId) &&
+                                   (AllNodes[b].tabIndex !== undefined))
+                               ? AllNodes[b].tabIndex : 999),
+            999);
+        return (leftIndex < 999) ? leftIndex : 0;
     }
 
     expectedTabIndex() {
@@ -687,10 +787,11 @@ class BTAppNode extends BTNode {
         // first make sure each node has a unique tagPath
         BTNode.generateUniqueTopicPaths();
         Tags = new Array();
-        for (const node of AllNodes) {
-            if (node && node.level == 1)
-                tagsForNode(node.id);
-        }
+        $("#content tr").each(function() {
+            const id = $(this).attr('data-tt-id');
+            if (AllNodes[id]?.level == 1)
+                tagsForNode(id);
+        });
     }
     
     static findFromTab(tabId) {
@@ -792,6 +893,20 @@ class BTLinkNode extends BTAppNode {
         return this._protocol;
     }
 
+    get text() {
+        return this._text;
+    }
+    
+    set text(txt) {
+        // When text is added this link is promoted to a headline. To prevent a dup link
+        // on next read replace the [[url][ttl]] in parent text with [url][ttl]
+        // so that it no longer has link syntax.
+        const parent = AllNodes[this.parentId];
+        const nonLink = this._title.slice(1, -1);
+        parent.text = parent.text.replace(this._title, nonLink);
+        this._text = txt;
+    }
+
     orgTextwChildren() {
         // only generate org text for links with added descriptive text
         if (this._text.length)
@@ -820,6 +935,7 @@ class BTLinkNode extends BTAppNode {
 
 const Handlers = {
     "loadBookmarks": loadBookmarks,
+    "importSession": importSession,
     "tabActivated": tabActivated,
     "tabGrouped": tabGrouped,
     "tabUpdated": tabUpdated,
@@ -827,7 +943,10 @@ const Handlers = {
     "tabMoved" : tabMoved,
     "tabClosed" : tabClosed,
     "storeTabs": storeTabs,
-    "launchApp": launchApp
+    "launchApp": launchApp,
+    "tabGroupCreated": tabGroupCreated,
+    "tabGroupUpdated": tabGroupUpdated,
+    "tabPositioned": tabPositioned
 };
 
 // Set handler for extension messaging

@@ -7,36 +7,12 @@
 
 'use strict'
 
-const OptionKey = (navigator.appVersion.indexOf("Mac")!=-1) ? "Option" : "Alt";
-const tipsArray = [
-    "Add ':' at the end of a topic in the BT Saver to create a new subtopic.",
-    "Double click on a table row to highlight its' open window, if any.",
-    "Type ':TODO' after a topic to make the item a TODO in the BT tree.",
-    "Create topics like ToRead or ToWatch to keep track of pages you want to come back to.",
-    "Remember to Refresh if you've been editing the BrainTool.org file directly. (Also make sure your updates are sync'd to your GDrive.)",
-    `${OptionKey}-b is the BrainTool accelerator key. You can change that in extension settings`,
-    "You can save individual gmails or google docs into the BT tree.",
-    "Save LinkedIn pages under specific topics to keep track of your contacts in context.",
-    "Use the TODO (star) button on a row to toggle between TODO, DONE and none.",
-    "See BrainTool.org for the BrainTool blog and other info.",
-    "Check out the Bookmark import/export functions under Actions",
-    "You can click on the topics shown in the Saver instead of typing out the name.",
-    "Close and re-open this controls overlay to get a new tip!",
-    `Double tap ${OptionKey}-b, or double click the icon, to surface the BrainTool side panel.`,
-    "When you have an Edit card open, the up/down arrows will open the next/previous card.",
-    "Click on a row to select it then use keyboard commands. 'h' for a list of them.",
-    "You can also store local files and folders in BrainTool. Enter something like 'file:///users/tconfrey/Documents/' in the browser address bar.",
-    "Try hitting '1','2','3' etc to collapse the tree to that level.",
-    "Import public topic trees and useful links from braintool.org/topicTrees",
-    "Try the new DARK theme. It's under Actions"
-];
+const OptionKey = (navigator.userAgentData.platform == "macOS") ? "Option" : "Alt";
 
 var InitialInstall = false;
 var UpgradeInstall = false;
-var GroupingMode = 'TABGROUP';          // or 'NONE'
-var GDriveConnected = false;
-var Config = {};					    // general config info holder
-
+var GroupingMode = 'TABGROUP';                            // or 'NONE'
+var MRUTopicPerWindow = {};                               // map winId to mru topic
 
 /***
  *
@@ -47,44 +23,13 @@ var Config = {};					    // general config info holder
 async function launchApp(msg) {
     // Launch app w data passed from extension local storage
     
-    ClientID = msg.client_id;
-    APIKey = msg.api_key;
-    FBKey = msg.fb_key;
-    STRIPE_PUBLISHABLE_KEY = msg.stripe_key;
-    Config = msg.Config || {};
+    configManager.setConfigAndKeys(msg);
     InitialInstall = msg.initial_install;
-    UpgradeInstall = msg.upgrade_install;                     // null or value of 'previousVersion'
-
-    if (InitialInstall || UpgradeInstall)
-        setTimeout(closeMenu, 5000);
-    else {
-        addTip();
-        setTimeout(closeMenu, 1500);
-    }
-    if (InitialInstall) {
-        gtag('event', 'Install', {'event_category': 'General', 'event_label': InitialInstall});
-    }
+    UpgradeInstall = msg.upgrade_install;                   // null or value of 'previousVersion'
         
     BTFileText = msg.BTFileText;
     processBTFile();                                          // create table etc
     
-    gtag('event', 'Launch', {'event_category': 'General', 'event_label': 'NumNodes', 'value': AllNodes.length});
-
-    // Update ui for new users
-    if (InitialInstall || UpgradeInstall) {
-	    $("#tip").hide();
-	    $("#openingTips").show();
-        $("#openingTips").animate({backgroundColor: '#7bb07b'}, 5000).animate({backgroundColor: 'rgba(0,0,0,0)'}, 30000);
-        if (UpgradeInstall) {
-            // Need to make a one time assumption that an upgrade from before 0.9 is already connected
-            if (UpgradeInstall.startsWith('0.8') ||
-                UpgradeInstall.startsWith('0.7') ||
-                UpgradeInstall.startsWith('0.6'))
-                setMetaProp('BTGDriveConnected', 'true');
-            gtag('event', 'Upgrade', {'event_category': 'General', 'event_label': UpgradeInstall});
-        }
-    }
-
     // scroll to top
     $('html, body').animate({scrollTop: '0px'}, 300);
 
@@ -93,30 +38,19 @@ async function launchApp(msg) {
 
     // Get BT sub id => premium 
     // BTId in local store and from org data should be the same. local store is primary
-    if (msg.bt_id) {
-	    BTId = msg.bt_id;
-	    if (!getMetaProp('BTId')) setMetaProp('BTId', BTId);
-	    else if (BTId != getMetaProp('BTId'))
-	        alert(`Conflicting subscription id's found! This should not happen. I'm using the local value, if there are issue contact BrainTool support.\nLocal value:${BTId}\nOrg file value:${getMetaProp('BTId')}`);
+    if (msg?.Config?.BTId) {
+	    BTId = msg.Config.BTId;
+        if (getMetaProp('BTId') && (BTId != getMetaProp('BTId')))
+	        alert(`Conflicting subscription id's found! This should not happen. I'm using the local value, if there are issues contact BrainTool support.\nLocal value:${BTId}\nOrg file value:${getMetaProp('BTId')}`);
+	    setMetaProp('BTId', BTId);
     } else {
 	    // get from file if not in local storage and save locally (will allow for recovery if lost)
 	    if (getMetaProp('BTId')) {
 	        BTId = getMetaProp('BTId');
-	        Config.bt_id = BTId;
-	        window.postMessage({'function': 'localStore', 'data': {'BTId': BTId}});
-	        window.postMessage({'function': 'localStore', 'data': {'Config': Config}});
+            configManager.setProp('BTId', BTId);
 	    }
     }
     
-    // If bookmarks have been imported remove button from controls screen (its still under options)
-    if (!getMetaProp('BTLastBookmarkImport')) {
-	    $("#importBookmarkButton").show();
-	    $("#openOptionsButton").text("Other Actions");
-    }
-
-    // show Alt or Option appropriately in visible text (Mac v PC)
-    $(".alt_opt").text(OptionKey);
-
     // If subscription exists and not expired then user is premium
     let sub = null;
     if (BTId) {
@@ -125,29 +59,86 @@ async function launchApp(msg) {
 	        console.log('Premium subscription exists, good til:', new Date(sub.current_period_end.seconds * 1000));
 	        if ((sub.current_period_end.seconds * 1000) > Date.now()) {
 		        // valid subscription, toggle from sub buttons to portal link
-		        $(".subscription_buttons").hide();
-		        $("#portal_row").show();
+                $('#settingsSubscriptionAdd').hide();
+                $('#settingsSubscriptionStatus').show();
+                $('#subId').text(BTId);
 	        }
 	    }
     }
 
-    // show special offer link if not subscribed and not first run
-    if (!sub && !(InitialInstall || UpgradeInstall))
-	    $("#specialOffer").show();
+    // show Alt or Option appropriately in visible text (Mac v PC)
+    $(".alt_opt").text(OptionKey);
 
-    handleInitialTabs(msg.all_tabs);              // handle currently open tabs
-    checkCompactMode();                           // drop note col if to narrow
+    handleInitialTabs(msg.all_tabs, msg.all_tgs);         // handle currently open tabs
+    checkCompactMode();                                   // drop note col if to narrow
+    updateStats();                                        // record numlaunches etc
 }
 
+function updateStats() {
+    // read and update various useful stats, only called at startup
+    // NB before gtag calls some stats as for the previous session (eg BTSessionStartTime)
+    
+    // Record this launch and software version
+    gtag('event', 'Launch', {'event_category': 'General', 'event_label': '0.9.9a',
+                             'value': 1});    
+    if (InitialInstall) {
+        gtag('event', 'Install', {'event_category': 'General', 'event_label': InitialInstall,
+                                  'value': 1});
+        configManager.setStat('BTInstallDate', Date.now());
+    }
+    if (UpgradeInstall)
+        gtag('event', 'Upgrade', {'event_category': 'General', 'event_label': UpgradeInstall,
+                                  'value': 1});
 
-function addTip() {
-    // add random entry from the tipsArray
-    let indx = Math.floor(Math.random() * tipsArray.length);
-    $("#tip").html(tipsArray[indx]);
-    $("#tip").show();
+    // Calculate some other stat info (and do some one-time setup of installDate and numSaves)
+    // Since numSaves was not recorded as a stat previously, use BTVersion from org file
+    let stats = configManager.getProp('BTStats');
+    if (!stats['BTNumSaves']) configManager.setStat('BTNumSaves',
+                                                    parseInt(configManager.getProp('BTVersion')));
+    if (!stats['BTInstallDate']) configManager.initializeInstallDate(); // wasn't set pre-099
+    configManager.incrementStat('BTNumLaunches');         // this launch counts
+    stats = configManager.getProp('BTStats');
+    
+    const lastSessionMinutes =
+          parseInt((stats['BTLastActivityTime'] - stats['BTSessionStartTime']) / 60000);
+    const daysSinceInstall =
+          parseInt((Date.now() - stats['BTInstallDate']) / 60000 / 60 / 24);
+    const currentOps = stats['BTNumTabOperations'] || 0;
+    const currentSaves = stats['BTNumSaves'] || 0;
+    const lastSessionOperations = currentOps - (stats['BTSessionStartOps'] || 0);
+    const lastSessionSaves = currentSaves - (stats['BTSessionStartSaves'] || 0);
+
+    // Record general usage summary stats, they don't apply on first install
+    if (!InitialInstall) {
+        gtag('event', 'Launch', {'event_category': 'Usage', 'event_label': 'NumLaunches',
+                                     'value': stats['BTNumLaunches']});
+        gtag('event', 'Launch', {'event_category': 'Usage', 'event_label': 'NumSaves',
+                                     'value': stats['BTNumSaves']});
+        gtag('event', 'Launch', {'event_category': 'Usage', 'event_label': 'NumTabOperations',
+                                     'value': stats['BTNumTabOperations'] || 0});
+        gtag('event', 'Launch', {'event_category': 'Usage', 'event_label': 'NumNodes',
+                                     'value': AllNodes.length});
+        gtag('event', 'Launch', {'event_category': 'Usage', 'event_label': 'LastSessionMinutes',
+                                     'value': lastSessionMinutes});
+        gtag('event', 'Launch', {'event_category': 'Usage', 'event_label': 'LastSessionSaves',
+                                     'value': lastSessionSaves});
+        gtag('event', 'Launch', {'event_category': 'Usage', 'event_label': 'LastSessionOperations',
+                                     'value': lastSessionOperations});
+        gtag('event', 'Launch', {'event_category': 'Usage', 'event_label': 'DaysSinceInstall',
+                                     'value': daysSinceInstall});
+    }
+
+    // Overwrite data from previous session now that its recorded
+    configManager.setStat('BTSessionStartTime', Date.now());
+    configManager.setStat('BTSessionStartSaves', currentSaves);
+    configManager.setStat('BTSessionStartOps', currentOps);
+
+    // show message or tip. Reset counter on upgrade => new messages
+    if (InitialInstall || UpgradeInstall) configManager.setProp('BTLastShownMessageIndex', 0);
+    messageManager.setupMessages();
 }
 
-// register for focus
+// Register for focus
 window.onfocus = handleFocus;
 function handleFocus(e) {
     // Links w focus interfere w BTs selection so remove
@@ -158,156 +149,64 @@ function handleFocus(e) {
 
 async function warnBTFileVersion(e) {
     // warn in ui if there's a backing file and its newer than local data
-    
+
+    // Do we need to warn?
     const warn = syncEnabled() && await checkBTFileVersion();
     if (!warn) {
-	    $("#stats_row").css('background-color', '');
-	    return;
+        // If not remove any warning and return
+        messageManager.removeWarning();
+        return;
     }
-    
-    $("#headerRefreshButton").show();
-    $("#refresh").prop("disabled", false);
-    $("#saves_span").attr('data-wenk', 'Remote file is newer,\nconsider refreshing');
-    $("#stats_row").css('background-color', '#ffcc00');
-    console.log("Newer BTFile version on GDrive, sending gtag event and warning");
+
+    // Need to warn
+    messageManager.showWarning("The synced version of your BrainTool file has newer data. <br/>Click here to refresh or disregard and it will be overwritten on the next save.");
+        
+    // June-22 not really sure this is useful info at this point
+    console.log("Newer BTFile version in file, sending gtag event and warning");
     gtag('event', 'FileVersionMismatch', {'event_category': 'Error'});
 }
-
-function handleInitialTabs(tabs) {
+                         
+function handleInitialTabs(tabs, tgs) {
     // array of {url, id, groupid, windId} passed from ext. mark any we care about as open
 
     tabs.forEach((tab) => {
 	    const node = BTNode.findFromURL(tab.url);
 	    if (!node) return;
-	    
-        $("tr[data-tt-id='"+node.id+"']").addClass("opened");
+
+        setNodeOpen(node);                                  // set and propogate open in display
         node.tabId = tab.id;
         node.windowId = tab.windowId;
         node.tabIndex = tab.tabIndex;
+        MRUTopicPerWindow[node.windowId] = node.tagPath;
         if (tab.groupId > 0) node.tabGroupId = tab.groupId;
         if (node.parentId && AllNodes[node.parentId]) {
             AllNodes[node.parentId].windowId = node.windowId;
             AllNodes[node.parentId].tabGroupId = node.tabGroupId;
-            $("tr[data-tt-id='"+node.parentId+"']").addClass("opened");
         }
     });
+    tgs.forEach((tg) => 
+        tabGroupUpdated({'tabGroupId': tg.id, 'tabGroupColor': tg.color, 'tabGroupName': tg.title,
+                         'tabGroupCollapsed': tg.collapsed}));
+    // remember topic per window for suggestions in popup
+    window.postMessage({'function': 'localStore', 'data': {'mruTopics': MRUTopicPerWindow}});
+    updateStatsRow();
 }
 
-/***
- *
- * Controls controller
- *
- ***/
-
-function toggleMenu(event) {
-    // Toggle the visibility of the welcome page
-    // NB controls_screen has a min height set, need to remove during animations
-
-    if (event && event.target == $('#search_entry')[0]) return;	// click was on search box
-    
-    const minHeight = $("#controls_screen").css('min-height');
-    if ($("#controls_screen").is(":visible")) {
-        // Close
-        $("#controls_screen").css('min-height',0)
-	        .slideUp(400, 'easeInCirc', () => {
-                $(this).css('min-height', minHeight);
-                $("#open_close_span").attr('data-wenk', "Options, Actions, Info");
-                $("#open_close_span").addClass("wenk--right");
-                $("#open_close_image").addClass("animate_more");
-            });
-	    if (toggleMenu.introMessageShown)
-	        $("#openingTips").hide();		     // if not already hidden
-
-        // scroll-margin ensures the selection does not get hidden behind the header
-        $(".treetable tr").css("scroll-margin-top", "50px");
-        $("#open_close_image").attr('src', 'resources/more.svg');
-    } else {
-        // Open
-        toggleMenu.introMessageShown = true;         // leave tip showing and remember it showed
-        addTip();                                    // display tip text after intro message shown
-        $("#controls_screen").css('min-height',0)
-	        .slideDown(400, 'easeInCirc', () => {
-                $(this).css('min-height', minHeight);
-                $("#open_close_span").removeAttr('data-wenk');
-                $("#open_close_span").removeClass("wenk--right");
-                $("#open_close_image").removeClass("animate_more");
-            });
-        $(".treetable tr").css("scroll-margin-top", "425px");
-        $("#open_close_image").attr('src', 'resources/close.png');
-    }
-}
-function closeMenu() {
-    // close the intro page if its visible
-    if ($("#controls_screen").is(":visible"))
-        toggleMenu();
-}
-
-function toggleOptions(dur = 400) {
-    // Toggle visibility of option div
-    if ($("#options").is(":visible")) {
-        $("#options").hide({duration: dur, easing: 'easeInCirc'});
-    } else {
-        $("#options").show({duration: dur, easing: 'easeInCirc'});
-    }
-}
-
-var ToggleMenuBackAfterHelp = false;      // keep track of if controls only opened to show help
-function toggleHelp(dur = 400) {
-    // Toggle visibility of help div
-    if ($("#help").is(":visible")) {
-        if (ToggleMenuBackAfterHelp) {
-            ToggleMenuBackAfterHelp = false;
-            toggleMenu();
-            dur = 1500;
-        }
-        $("#help").hide({duration: dur, easing: 'easeInCirc'});
-    } else {
-        $("#help").show({duration: dur, easing: 'easeInCirc'});
-        if (!$("#controls_screen").is(":visible")) {
-            ToggleMenuBackAfterHelp = true;
-            setTimeout(() => toggleMenu(), dur);
-        }
-    }
-}
-
-function updateStatsRow(modifiedTime = null) {
-    // update #tags, urls, saves
-    const numTags = AllNodes.filter(n => n?.isTag()).length;
-    const numOpenTags = AllNodes.filter(n => n?.isTag() && n?.hasOpenChildren()).length;
-    const numLinks = AllNodes.filter(n => n?.URL).length;
-    const numOpenLinks = AllNodes.filter(n => n?.URL && n?.tabId).length;
-
-    const numSaves = getMetaProp('BTVersion');
-    const tagText = `${numTags + numLinks} Items\n(${numOpenLinks} open tabs)`;
-    $('#num_topics').text(numOpenTags ? `:${numTags + numLinks} (${numOpenLinks})` : `:${numTags + numLinks}`);
-    $("#brain_span").attr('data-wenk', tagText);
-    
-    const saveTime = getDateString(modifiedTime);           // null => current time
-    $("#file_stats").html(`<i>Saved: ${saveTime}</i>`);
-    $("#saves_span").attr('data-wenk', `Last saved: \n${saveTime}`);
-
-    if (GDriveConnected)                                    // set save icon to GDrive, not fileSave
-        $("#saves").attr("src", "resources/drive_icon.png");
-    if (syncEnabled()) {
-	$("#stats_row").css('background-color', '');
-        $("#headerRefreshButton").hide();
-	$("#refresh").prop("disabled", true);
-    }
-}
 
 function brainZoom(iteration = 0) {
     // iterate thru icons to swell the brain
 
-    const iterationArray = [0,1,2,3,4,3,2,1,0];
+    const iterationArray = ['01','02', '03','04','05','06','07','08','09','10','05','04', '03','02','01'];
     const path = '../extension/images/BrainZoom'+iterationArray[iteration]+'.png';
     
     if (iteration == iterationArray.length) {
-        $("#brain").attr("src", "../extension/images/BrainTool48.png");
+        $("#brain").attr("src", "../extension/images/BrainTool128.png");
         return;
     }
     $("#brain").attr("src", path);
-    const interval = iteration == 4 ? 400 : 200;
+    const interval = 150; //iteration == 4 ? 200 : 100;
     setTimeout(function() {brainZoom(++iteration);}, interval);
+
 }
 
 /***
@@ -324,32 +223,26 @@ var OpenedNodes = [];          // attempt to preserve opened state across refres
 
 async function refreshTable(fromStore = false) {
     // Clear current state and redraw table. Used after an import or on manual GDrive refresh request
+    // Needed to regenerate the tabletree structures
 
     // First check to make sure we're not clobbering a pending write, see fileManager.
     if (savePendingP()) {
         alert('A save is currently in process, please wait a few seconds and try again');
         return;
     }
-    $("#refresh").prop("disabled", true);
     $('body').addClass('waiting');
     
     // Remember window opened state to repopulate later
-    // TODO populate from node.opened
-    OpenedNodes = [];
-    $("tr.opened").each(function() {
-        const id = $(this).attr("data-tt-id");
-        OpenedNodes.push(AllNodes[id]);
-    });
+    OpenedNodes = AllNodes.filter(n => (n.tabId || n.tabGroupId));
+    
     BTNode.topIndex = 1;
     AllNodes = [];
 
-    // Either get BTFileText from gDrive or use local copy. If GDrive then await its return
+    // Either get BTFileText from file or use local copy. If file then await its return
     try {
         if (fromStore)
             await getBTFile();
         processBTFile();
-        $("#headerRefreshButton").hide();
-	$("#refresh").prop("disabled", true);
     }
     catch (e) {
         console.warn('error in refreshTable: ', e.toString());
@@ -366,11 +259,11 @@ function generateTable() {
         outputHTML += node.HTML();
     });
     outputHTML += "</table>";
+    BTAppNode.populateFavicons();                         // filled in async
     return outputHTML;
 }
 
 
-var RefreshCB = null;           // callback on refresh completion (used by bookmark import)
 function processBTFile() {
     // turn the org-mode text into an html table, extract Topics
 
@@ -407,15 +300,17 @@ function processBTFile() {
     
     // initialize ui from any pre-refresh opened state
     OpenedNodes.forEach(oldNode => {
-        const node = BTNode.findFromTitle(oldNode.title);
+        const node = BTNode.findFromTitle(oldNode?.title);
         if (!node) return;
         $("tr[data-tt-id='"+node.id+"']").addClass("opened");
         node.tabId = oldNode.tabId;
         node.windowId = oldNode.windowId;
         node.tabGroupId = oldNode.tabGroupId;
-        if (node.parentId && AllNodes[node.parentId]) {
+        node.tabIndex = oldNode.tabIndex;
+        if (oldNode.tgColor) node.setTGColor(oldNode.tgColor);
+        if (node.parentId && AllNodes[node.parentId] && node.windowId) {
             AllNodes[node.parentId].windowId = node.windowId;
-            AllNodes[node.parentId].tabGroupId = node.tabGroupId;
+            //AllNodes[node.parentId].tabGroupId = node.tabGroupId;
         }
     });
     
@@ -428,9 +323,8 @@ function processBTFile() {
         });
     }, 200);
 
-    updatePrefs();
+    configManager.updatePrefs();
     $('body').removeClass('waiting');
-    if (RefreshCB) RefreshCB();                      // may be a callback registered
 }
 
 
@@ -465,12 +359,10 @@ function initializeUI() {
 	    // first check this is not openclose button, can't stop propagation
 	    if (e?.originalEvent?.target?.classList?.contains('openClose')) return;
 
-        // close menu overlay on click
-        if ($("#controls_screen").is(":visible")) toggleMenu();
-
         // select the new row
         $("tr.selected").removeClass('selected');
         $(this).addClass("selected");
+        configManager.closeConfigDisplays();              // clicking also closes any open panel
     });
     
     // make rows draggable    
@@ -479,20 +371,23 @@ function initializeUI() {
             buttonHide();
 	        
             const clone = $(this).clone();
-	        $(clone).find('.btTitle').html('');		   // empty clone of contents, for some reason
-	        $(clone).find('.btText').html('');		   // ..seems to screw up the mouse cursor
+	        $(clone).find('.btTitle').html('HELKP!');		   // empty clone of contents, for some reason
+//	        $(clone).find('.btText').html('');		   // ..seems to screw up the mouse cursor
+            $(clone).css('background-color', '#7bb07b');
 	        
-            $("table.treetable tr").off('mouseenter');     // turn off hover behavior during drag
+            $("table.treetable tr").off('mouseenter'); // turn off hover behavior during drag
             $("table.treetable tr").off('mouseleave');
             return clone;
         },     
         start: dragStart,       // call fn below on start
-        handle: "#move",        // use the #move button as handle
+//        handle: "#move",           // use the #move button as handle
         axis: "y",
-        scrollSpeed: 10,
-        containment: "#content",
+        scrollSpeed: 5,
+        //        containment: "#content",
+        scroll: true,
+        scrollSensitivity: 100,
         cursor: "move",
-        opacity: .50,
+        opacity: .75,
         stop: function( event, ui ) {
             // turn hover bahavior back on
             $("table.treetable tr").on('mouseenter', null, buttonShow);
@@ -526,7 +421,7 @@ function initializeUI() {
     if ($("#buttonRow")[0])
         ButtonRowHTML = $("#buttonRow")[0].outerHTML;
 
-    updateStatsRow();                                      // show updated stats
+    updateStatsRow(configManager.getProp('BTTimestamp'));   // show updated stats w last save time
 }
 
 function reCreateButtonRow() {
@@ -549,6 +444,7 @@ function dragStart(event, ui) {
     const node = AllNodes[nodeId];
     node.dragging = true;
     if (node.childIds.length && !node.folded) {
+        node.collapsedForDrag = true;
         $("#content").treetable("collapseNode", nodeId);
     }
 }
@@ -564,36 +460,46 @@ function dropNode(event, ui) {
     const dropNodeId = $(dropNode).attr('data-tt-id');
     const dropBTNode = AllNodes[dropNodeId];
     const treeTable = $("#content");
+    const oldParentId = dragNode.parentId;
 
     if (dropNodeId && dropBTNode) {
-        const oldParentId = dragNode.parentId;
-        moveNode(dragNode, dropBTNode, oldParentId);        
+        // move node and any associated tab/tgs
+        moveNode(dragNode, dropBTNode, oldParentId);
     }
+    if (dragNode.collapsedForDrag)
+        $("#content").treetable("expandNode", dragNodeId);
     
     // Clean up
     dragNode.dragging = false;
+    dragNode.collapsedForDrag = null;
     $(dragTarget).removeClass("dragTarget").removeClass("hovered", 750);
     $("td").removeClass("dropOver");
 }
 
-function moveNode(dragNode, dropNode, oldParentId) {
+function moveNode(dragNode, dropNode, oldParentId, browserAction = false) {
     // perform move for DnD and keyboard move - drop Drag over Drop
+    // browserAction => user dragged tab in browser window, not in topic tree
     
     const treeTable = $("#content");
+    let newParent, dragTr;
     if (dropNode.isTag() && !dropNode.folded) {
         // drop into dropNode as first child
         dragNode.reparentNode(dropNode.id, 0);
+        newParent = dropNode;
         treeTable.treetable("move", dragNode.id, dropNode.id);
+        dragTr = $(`tr[data-tt-id='${dragNode.id}']`)[0];
+        $(dragTr).attr('data-tt-parent-id', dropNode.id);
     } else {
         // drop below dropNode w same parent
         const parentId = dropNode.parentId;
         const parent = parentId ? AllNodes[parentId] : null;
+        newParent = parent;
         dragNode.reparentNode(parentId,
                               parent ?
                               parent.childIds.indexOf(parseInt(dropNode.id)) + 1 :
                               -1);
         if (parentId) {
-            const dragTr = $(`tr[data-tt-id='${dragNode.id}']`)[0];
+            dragTr = $(`tr[data-tt-id='${dragNode.id}']`)[0];
             const dropTr = $(`tr[data-tt-id='${dropNode.id}']`)[0];
             treeTable.treetable("move", dragNode.id, parentId);
             positionNode(dragTr, parentId, dropTr);          // sort into position
@@ -606,12 +512,29 @@ function moveNode(dragNode, dropNode, oldParentId) {
     if (oldParentId && (AllNodes[oldParentId].childIds.length == 0)) {
         const ttNode = $("#content").treetable("node", oldParentId);
         $("#content").treetable("unloadBranch", ttNode);
+        if (AllNodes[oldParentId].level == 1)
+            $(`tr[data-tt-id='${oldParentId}'] td`).addClass('childlessTop');
     }
 
-    // update the rest of the app and backing store
+    // update tree row for new parent no longer childless
+    if (newParent) $(`tr[data-tt-id='${newParent.id}'] td`).removeClass('childlessTop');
+
+    // update the rest of the app, backing store and potentially move tab
     saveBT();
-    BTAppNode.generateTags();        
-    window.postMessage({'function': 'localStore', 'data': {'tags': Tags }});        
+    BTAppNode.generateTags();
+    if (dragNode.tabId && !browserAction) {
+        dragNode.moving = true;
+        const tabId = dragNode.tabId;
+        const windowId = newParent.windowId || dragNode.windowId;
+        const currentIndex = dragNode.tabIndex || 0;
+        dragNode.tabIndex = undefined;                    // take out of running in calc below
+        let index = dragNode.expectedTabIndex();
+        if (currentIndex < index) index = index - 1;      // moving right don't count current tab
+        window.postMessage({'function': 'moveTab', 'tabId': tabId,
+                            'windowId': windowId, 'index': index,
+                            'tabGroupId': newParent?.tabGroupId});
+    }
+    window.postMessage({'function': 'localStore', 'data': {'tags': Tags }});
 }
 
 function positionNode(dragNode, dropParentId, dropBelow) {
@@ -668,16 +591,22 @@ function rememberFold() {
 }
 
 function nodeExpand() {
-    let update = AllNodes[this.id].folded;
-    AllNodes[this.id].folded = false;
+    const node = AllNodes[this.id];
+    const update = node.folded;
+    node.folded = false;
 
     // set highlighting based on open child links
-    if (!AllNodes[this.id].hasOpenDescendants())
+    if (!node.hasOpenDescendants())
         $(this.row).removeClass('opened');
 
-    // Update File 
-    if (update) rememberFold();
+    // Update File and browser
+    if (update) {
+        rememberFold();
+        node.updateTabGroup();
+    }
+        
 }
+
 function nodeCollapse() {
     const node = AllNodes[this.id];
     const update = !node.folded;
@@ -687,10 +616,12 @@ function nodeCollapse() {
     if (node.hasOpenDescendants())
         $(this.row).addClass('opened');
     
-    // Update File, if collapse is not a result of a drag start
-    if (update && !node.dragging) rememberFold();
+    // Update File and browser, if collapse is not a result of a drag start
+    if (update && !node.dragging) {
+        rememberFold();
+        node.updateTabGroup();
+    }
 }
-
 
 function handleLinkClick(e) {
     const nodeId = $(this).closest("tr").attr('data-tt-id');
@@ -702,8 +633,8 @@ function handleLinkClick(e) {
 
 /***
  * 
- * Handle relayed messages from Content script. Notifications that background has done
- * something on our behalf.
+ * Handle relayed messages from Content script. Notifications that user has done something, 
+ * or background has done something on our behalf.
  * 
  ***/
 
@@ -780,11 +711,17 @@ function tabClosed(data) {
 
     function propogateClosed(parentId) {
         // node not open and recurse to parent
-        if (!parentId || AllNodes[parentId].hasOpenDescendants())
-            return;                          // terminate recursion
-        AllNodes[parentId].windowId = 0;
-        AllNodes[parentId].tabGroupId = 0;
-        let parentElt = $("tr[data-tt-id='"+parentId+"']");
+        if (!parentId) return;                                  // terminate recursion
+
+        const parent = AllNodes[parentId];
+        // might have both last child closing but also have grandchildren
+        if (!parent.hasOpenChildren()) {
+            parent.windowId = 0;
+            parent.tabGroupId = 0;
+        }
+
+        if (parent.hasOpenDescendants()) return;                // terminate recursion
+        const parentElt = $("tr[data-tt-id='"+parentId+"']");
         parentElt.removeClass("opened");
         parentElt.addClass("hovered",
                            {duration: 1000,
@@ -792,7 +729,7 @@ function tabClosed(data) {
                                 parentElt.removeClass("hovered", 1000);
                             }});
         // propogate up tree to dehighlight ancestors as appropriate
-        propogateClosed(AllNodes[parentId].parentId);
+        propogateClosed(parent.parentId);
     };
 
     const tabId = data.tabId;
@@ -809,6 +746,19 @@ function tabClosed(data) {
     $("tr[data-tt-id='"+node.id+"']").removeClass("opened", 1000);
     propogateClosed(node.parentId);
     updateStatsRow();
+
+    // set parent window and tgids. handle case where tabs r open in multiple windows
+    if (node.parentId && AllNodes[node.parentId]) {
+        const parent = AllNodes[node.parentId];
+        if (!parent.hasOpenChildren())
+            AllNodes[node.parentId].tabGroupId = 0;
+        else if (parent.openWindowIds().indexOf(parent.windowId) < 0) {
+            const openNode = parent.findAnOpenNode();
+            parent.tabGroupId = AllNodes[openNode].tabGroupId;
+            parent.windowId = AllNodes[openNode].windowId;
+        }
+    }
+    
 }
 
 function storeTabs(data) {
@@ -826,9 +776,10 @@ function storeTabs(data) {
     const ttNode = topicNode.getTTNode();
 
     // update shared memory for popup
+    MRUTopicPerWindow[windowId] = topicDN;
     BTAppNode.generateTags();                     // NB should really only do this iff needed
     window.postMessage({'function': 'localStore', 'data':
-                        {'tags': Tags, 'mruTopic': topicDN, 'mruTime': new Date().toJSON(),
+                        {'tags': Tags, 'mruTopics': MRUTopicPerWindow,
                          'currentTag': topicNode.displayTag, 'currentText': note}});
 
     // process tabs to store
@@ -841,11 +792,13 @@ function storeTabs(data) {
         const title = cleanTitle(tabData.title);
         const tabId = tabData.tabId;
         const tabIndex = tabData.tabIndex;
+        const favUrl = tabData.faviconUrl;
         let node = BTAppNode.findFromTab(tabId);
         if (!node) {
             node = new BTAppNode(`[[${url}][${title}]]`, topicNode.id,
                                  note || "", topicNode.level + 1);
             node.tabId = tabId;
+            node.faviconUrl = favUrl;
             if (keyword) node.keyword = keyword;
             $("table.treetable").treetable("loadBranch", ttNode, node.HTML());
         } else {
@@ -853,11 +806,21 @@ function storeTabs(data) {
             node.text = note || "";
             if (keyword) node.keyword = keyword;
             node.redisplay();
+            node.faviconUrl = favUrl;
             let tabData = {tabId: tabId, windowId: windowId, groupId: 0};
             tabActivated(tabData);       // set local storage for any subsequent popup open
         }
         node.tabIndex = tabData.tabIndex;
         newNodes.push(node);
+
+        // save the url<->favicon mapping locally for Favicon feature.
+        try {
+            const u = url.split(/[?#]/)[0];               // take off any params
+            localFileManager.set(u, favUrl);
+        }
+        catch (e) {
+            console.warn('URL/Favicon storage error: ', e);
+        };
     });
 
     // sort tree based on position in parents child array
@@ -871,6 +834,7 @@ function storeTabs(data) {
     saveBT();
     changeSelected(newNodes[0]);                // select newly added node in tree
 
+    newNodes.forEach(node => node.populateFavicon());
     // Execute tab action (close or save)
     if (tabAction == 'CLOSE') {
         newNodes.forEach(node => node.closeTab());
@@ -880,6 +844,9 @@ function storeTabs(data) {
 
     // group w siblings if appropriate (they exist and are in same window)
     if (GroupingMode != 'TABGROUP') return;
+    
+    // acknowledge now BT node with brain animation
+    window.postMessage({'function' : 'brainZoom', 'tabId' : newNodes[newNodes.length - 1].tabId});
     if ((topicNode.windowId == windowId && topicNode.tabGroupId) || newNodes.length > 1)
         topicNode.groupAndPosition();
     else {
@@ -925,13 +892,9 @@ function tabUpdated(data) {
         const parentId = urlNode.parentId;
         const currentTopicWin = AllNodes[parentId]?.windowId;
 
-        data['nodeId'] = urlNode.id;
-
         // handle same as directed tab opens
+        data['nodeId'] = urlNode.id;
         tabOpened(data, true);
-        
-        // acknowledge nav to BT node with brain animation
-        window.postMessage({'function' : 'brainZoom', 'tabId' : tabId});
         return;
     }
 
@@ -974,6 +937,102 @@ function tabGrouped(data) {
         AllNodes[node.parentId].tabGroupId = data.tgId;
 }
 
+function tabGroupCreated(data) {
+    // TG created update associated topic color as appropriate
+
+    const tgId = data.tabGroupId;
+    const color = data.tabGroupColor;
+    const node = BTAppNode.findFromGroup(tgId);
+    node?.setTGColor(color);
+}
+
+function tabGroupUpdated(data){
+    // TG updated update associated topic as appropriate
+
+    const tgId = data.tabGroupId;
+    const color = data.tabGroupColor;
+    const name = data.tabGroupName;
+    const collapsed = data.tabGroupCollapsed;
+    const node = BTAppNode.findFromGroup(tgId);
+    const displayNode = node?.getDisplayNode();
+    if (!node || !displayNode) return;
+    
+    if (color)
+        node.setTGColor(color);
+    
+    if (name && (name != node.title)) {
+        node.title = name;
+        $(displayNode).find(".btTitle").html(name);
+    }
+    if (collapsed === undefined) return; 
+    if (collapsed) $("table.treetable").treetable("collapseNode", node.id);
+    if (!collapsed) $("table.treetable").treetable("expandNode", node.id);
+}
+
+function tabPositioned(data) {
+    // tab's position changed, could be moving into and/or out-of/or around a TG
+    // NB data.tabIndices maps tabId to index. need to reset globally since moves change other tabs
+
+    const tabId = data.tabId;
+    const tgId = data.groupId;
+    let tabNode = BTAppNode.findFromTab(tabId);
+    const topicNode = BTAppNode.findFromGroup(tgId);        
+    const index = data.tabIndex;
+    const winId = data.windowId;
+    const indices = data.tabIndices;
+    const tab = data.tab;
+    if (!tabNode && !topicNode) return;                                 // don't care
+    if (!tabNode) {
+        // unmanaged tab dropped into managed TG => save it to the topic
+        tabNode = new BTAppNode(`[[${tab.url}][${tab.title}]]`, topicNode.id,
+                                "", topicNode.level + 1);
+        tabNode.tabId = tabId;
+        tabNode.tabGroupId = tgId;
+        tabNode.faviconUrl = tab.favIconUrl;
+        $("table.treetable").treetable("loadBranch", topicNode.getTTNode(), tabNode.HTML());
+        tabNode.populateFavicon();
+        initializeUI();
+    }
+    let dropUnderNodeId = topicNode?.id;
+
+    if (tabNode?.moving) {
+        // this message is a result of a requested move (see moveNode above) after a d'n'd
+        tabNode.moving = false;
+        updateTabIndices(indices);
+        return;
+    }
+    if (topicNode) {        
+        // find where tabNode should go under topicNode.
+        const leftIndex = topicNode.leftmostOpenTabIndex();
+        topicNode.windowId = winId;                       // might have changed (tg drag gets here)
+        if (index > leftIndex)
+            for (let [tabId, tabData] of Object.entries(indices)) {
+                if ((tabData.windowId == winId) && (tabData.index == (index - 1)))
+                    dropUnderNodeId = BTAppNode.findFromTab(tabId).id;
+            }
+    }
+    else if (tabNode?.tabGroupId) {
+        // node has tgId but no topic found => node moved out from topic, move to grandparent
+        dropUnderNodeId = AllNodes[tabNode.parentId].parentId;
+        tabNode.tabGroupId = 0;
+    }
+    // now use move fn from drag/drop to put tabnode in place if not already in place
+    // NB can get here if a BT node nav's away then back, don't want to move (== save) in that case
+    if (dropUnderNodeId && AllNodes[dropUnderNodeId]) {
+        const dropUnderNode = AllNodes[dropUnderNodeId];
+        
+        if (dropUnderNode.tabGroupId != tabNode.tabGroupId) return;
+        
+        const dispNode = tabNode.getDisplayNode();
+        const underDisplayNode = dropUnderNode.getDisplayNode();
+        if ($(dispNode).prev()[0] != underDisplayNode)
+            moveNode(tabNode, dropUnderNode, tabNode.parentId, true);
+        tabNode.setTGColor(dropUnderNode.tgColor);
+        tabNode.windowId = winId;
+        updateTabIndices(indices);
+    }
+}
+    
 // Utility functions for the above
 
 function cleanTitle(text) {
@@ -1012,6 +1071,7 @@ function changeSelected(node) {
     if (!node) return;                          // nothing to select, we're done
     
 	const tableNode =  node.getDisplayNode();
+    if (!tableNode) return;
 	if(!$(tableNode).is(':visible'))
 	    node.showForSearch();				    // unfold tree etc as needed
 	currentSelection && $(currentSelection).removeClass('selected');
@@ -1024,8 +1084,19 @@ function changeSelected(node) {
     if ((topOfRow < displayTop) || (topOfRow > (displayTop + height - 100)))
 	    tableNode.scrollIntoView({block: 'center'});
 	$("#search_entry").val("");				    // clear search box on nav
-}	
+}
 
+function updateTabIndices(indices) {
+    // hash of tabId:{tabIndex, windowId} sent from background after tabPositioned
+    let tab;
+    for (let [tabId, tabData] of Object.entries(indices)) {
+        tab = BTAppNode.findFromTab(tabId);
+        if (tab) {
+            tab.tabIndex = tabData.index;
+            tab.windowId = tabData.windowId;
+        }
+    }
+}
 
 /*** 
  * 
@@ -1049,7 +1120,17 @@ function buttonShow(e) {
     $("#buttonRow").detach().appendTo($(td));
     const offset = $(this).offset();
     const height = $(this).height();
-    const rowtop = (offset.top);
+    const rowtop = offset.top;
+
+    // figure out if tooltips would go off bottom
+    const scrollTop = $(document).scrollTop();
+    const top = rowtop - scrollTop;
+    const windowHeight = $(window).height();
+    const bottomGap = windowHeight - top;
+    if (bottomGap < 130)
+        $("#buttonRow span").removeClass("wenk--left").addClass("wenk--right");
+    else 
+        $("#buttonRow span").removeClass("wenk--right").addClass("wenk--left");
 
     // Open/close buttons 
     const node = getActiveNode(e);
@@ -1088,6 +1169,7 @@ function buttonShow(e) {
         $("#outdent").hide();
     
     $("#buttonRow").offset({top: rowtop});
+    $("#buttonRow").css("z-index", "0");
     $("#buttonRow").show();        
 }
 
@@ -1127,16 +1209,19 @@ function editRow(e) {
     else {
         $("#dn").show();
         const upto = dn.lastIndexOf(':');
-        let displayStr = dn.substr(0, upto);
-        const maxLen = 50;
-        if (displayStr.length > maxLen) displayStr = "..." + displayStr.substring(displayStr.length - maxLen);
+        const displayStr = dn.substr(0, upto);
         $("#distinguishedName").text(displayStr);
+        // if too long scroll to right side
+        setTimeout(() => {
+            const overflow = $("#distinguishedName")[0].scrollWidth - $("#distinguishedName")[0].offsetWidth;
+            if (overflow > 0) $("#distinguishedName").animate({ scrollLeft: '+='+overflow}, 500);
+        }, 500);
     }
     if (node.isTag()) {
         $("#title-url").hide();
         $("#title-text").hide();
-        $("#topic").show();
-        $("#topicName").val(node.displayTag);
+        $("#topic").show();        
+        $("#topicName").val($("<div>").html(node.displayTag).text());
         node.displayTag && $("#newTopicNameHint").hide();
     } else {
         $("#title-url").show();
@@ -1149,21 +1234,22 @@ function editRow(e) {
     $("#update").prop("disabled", true);
 
     // overlay grays everything out, dialog animates open on top.
-    $("#content").addClass('editOverlaid');
     $("#editOverlay").css("display", "block");
     const fullWidth = $($("#editOverlay")[0]).width();
-    const dialogWidth = Math.min(fullWidth - 80, 600);
-    const height = dialogWidth / 1.618;                 // golden!
-    $("#text-text").height(height - 140);               // notes field fits but as big as possible
-
-    if ((top + height + 100) < $(window).height())
-        $(dialog).css("top", bottom+60);
+    const dialogWidth = Math.min(fullWidth - 63, 600);    // 63 = padding + border == visible width
+    const height = dialogWidth / 1.618;                   // golden!
+    /*
+    const otherRows = node.isTag() ? 100 : 120;           // non-text area room needed
+    $("#text-text").height(height - otherRows);           // notes field fits but as big as possible
+*/
+    if ((top + height + 140) < $(window).height())
+        $(dialog).css("top", bottom+80);
     else
         // position above row to avoid going off bottom of screen (or the top)
         $(dialog).css("top", Math.max(10, top - height + 30));
 
     // Animate opening w calculated size
-    $(dialog).css({display: 'block', opacity: 0.0, height: 0, width:0})
+    $(dialog).css({display: 'flex', opacity: 0.0, height: 0, width:0})
         .animate({width: dialogWidth, height: height, opacity: 1.0},
                  duration, 'easeInCirc',
                  function () {
@@ -1186,17 +1272,20 @@ $("#editOverlay").click(function(e) {
     }
 });
 
-function checkCompactMode() {
-    // when window is too small drop the notes column
-    if ($(window).width() < 350) {
+function checkCompactMode(force = false) {
+    // when window is too small drop the notes column, also used when set in settings
+    const width = $(window).width();
+    const notesPref = configManager.getProp('BTNotes');
+    if (force || width < 350 || (notesPref == 'NONOTES')) {
         $("#content").addClass('compactMode');
-        $("#stats_row").hide();
         $("#search").css('left', 'calc((100% - 175px) / 2)');
+        $("#searchHint .hintText").css('display', 'none');
     } else {
         $("#content").removeClass('compactMode');
-        $("#stats_row").show();
         $("#search").css('left', 'calc((100% - 300px) / 2)');
+        $("#searchHint .hintText").css('display', 'inline');
     }
+    updateStatsRow();
 }
 $(window).resize(() => checkCompactMode());
 
@@ -1212,7 +1301,6 @@ function closeDialog(cb = null, duration = 250) {
         dialog.close();
         if (cb) cb();
     });
-    $("#content").removeClass('editOverlaid');
 }
 
 function getActiveNode(e) {
@@ -1258,6 +1346,9 @@ function closeRow(e) {
     $("#openTab").show();
     $("#closeRow").hide();
     appNode.closeTab();
+    
+    gtag('event', 'closeRow', {'event_category': 'TabOperation'});
+    configManager.incrementStat('BTNumTabOperations');
 }
 
 function escapeRegExp(string) {
@@ -1287,6 +1378,25 @@ function deleteNode(id) {
     if (!node) return;
     const wasTag = node.isTag();
     const openTabs = node.listOpenTabs();
+
+    function propogateClosed(parentId) {
+        // update display of all ancestor nodes as needed
+        if (!parentId) return;
+        const parent = AllNodes[parentId];
+        const openKids = parent.hasOpenChildren();
+        const openDescendants = parent.hasOpenDescendants();
+        if (!openKids) {
+            parent.tabGroupId = 0;
+            parent.windowId = 0;
+        }
+        if (!openDescendants) $("tr[data-tt-id='"+parent.id+"']").removeClass("opened");
+        // update tree row if now is childless
+        if (parent.childIds.length == 0) {
+            const ttNode = $("#content").treetable("node", parent.id);
+            $("#content").treetable("unloadBranch", ttNode);
+        }
+        propogateClosed(parent.parentId);                       // recurse
+    }
     
     // Ungroup and highlight the tab if it's open.
     // (good user experience and side effect is to update the tabs badge info
@@ -1299,20 +1409,7 @@ function deleteNode(id) {
     BTNode.deleteNode(id);             // delete from model. NB handles recusion to children
     
     // Update parent display
-    const parent = AllNodes[node.parentId];
-    if (parent) {
-        const openKids = $("tr[data-tt-parent-id='"+parent.id+"']").hasClass("opened");
-        if (!openKids) {
-            $("tr[data-tt-id='"+parent.id+"']").removeClass("opened");
-            parent.tabGroupId = 0;
-            parent.windowId = 0;
-        }
-        // update tree row if now is childless
-        if (parent.childIds.length == 0) {
-            const ttNode = $("#content").treetable("node", parent.id);
-            $("#content").treetable("unloadBranch", ttNode);
-        }
-    }
+    propogateClosed(node.parentId);
     
     // if wasTag remove from Tags and update extension
     if (wasTag) {
@@ -1323,7 +1420,6 @@ function deleteNode(id) {
     // Update File 
     saveBT();
 }
-
 
 function updateRow() {
     // Update this node/row after edit.
@@ -1337,15 +1433,18 @@ function updateRow() {
     const url = $("#title-url").val();
     const title = $("#title-text").val();
     const topic = $("#topicName").val();
-    if (node.isTag())
+    if (node.isTag()) {
+        const changed = (node.title != topic);
         node.title = topic;
-    else
+        if (changed) node.updateTabGroup();               // update browser (if needed)
+    } else
         node.title = `[[${url}][${title}]]`;
     node.text = $("#text-text").val();
 
     // Update ui
     $(tr).find("span.btTitle").html(node.displayTitle());
     $(tr).find("span.btText").html(node.displayText());
+    if (node.tgColor) node.setTGColor(node.tgColor);
 
     // Update File 
     saveBT();
@@ -1370,7 +1469,8 @@ function toDo(e) {
     // Update ui and file
     const tr = $(`tr[data-tt-id='${appNode.id}']`);
     $(tr).find("span.btTitle").html(appNode.displayTitle());
-
+    if (appNode.tgColor) appNode.setTGColor(appNode.tgColor);
+    
     // Stop the event from selecting the row and line up a save
     e.stopPropagation();
     initializeUI();
@@ -1464,19 +1564,19 @@ function cancelEdit() {
  * 
  ***/
 
-function processImport(nodeName) {
+async function processImport(nodeId) {
     // an import (bkmark, org, tabsOutliner) has happened => save and refresh
 
-    RefreshCB = function() {animateNewImport(nodeName);};
-    saveBT();
-    refreshTable();
+    configManager.closeConfigDisplays();                      // close panel
+    await saveBT();                                           // save w imported data
+    refreshTable();                                           // re-gen treetable display
+    animateNewImport(nodeId);                                 // indicate success
 }
 
 function importBookmarks() {
     // Send msg to result in subsequent loadBookmarks, set waiting status and close options pane
     $('body').addClass('waiting');
     window.postMessage({'function': 'getBookmarks'});
-    //    toggleOptions(1500);
 }
 
 function loadBookmarks(msg) {
@@ -1489,8 +1589,8 @@ function loadBookmarks(msg) {
         return;
     }
 
-    const dateString = getDateString().replace(':', ';');        // 12:15 => :15 is a sub topic
-    const importName = "Imported Bookmarks (" + dateString + ")";
+    const dateString = getDateString().replace(':', '&#8759;');        // 12:15 => :15 is a sub topic
+    const importName = "&#x1F516; Bookmark Import (" + dateString + ")";
     const importNode = new BTAppNode(importName, null, "", 1);
 
     msg.data.bookmarks.children.forEach(node => {
@@ -1498,11 +1598,78 @@ function loadBookmarks(msg) {
     });
     gtag('event', 'BookmarkImport', {'event_category': 'Import'});
 
-    // remmember this import and remove button from main control screen
-    setMetaProp('BTLastBookmarkImport', dateString);
-    $("#importBookmarkButton").hide();
-    $("#openOptionsButton").text("Actions");
-    processImport(importName);                             // see above
+    // remmember this import
+    configManager.setProp('BTLastBookmarkImport', dateString);
+    processImport(importNode.id);                             // see above
+}
+
+function importSession(msg) {
+    // handler for session sent via msg {winID: {tabs[], tgs:{tabs[]}}}
+
+    const wins = msg.windows;
+    const dateString = getDateString().replace(':', '&#8759;');      // 12:15 => :15 is a sub topic
+    const sessionName = "Session Import (" + dateString + ")";
+    const parentName = msg.topic || "📝 Scratch";
+    const parent = BTAppNode.findOrCreateFromTopicDN(parentName);
+    const sessionNode = new BTAppNode(sessionName, parent.id, "", parent.level + 1);
+    const closeP = msg.close;                                        // close tabs after saving?
+    const newTabNodes = [];
+
+    Object.values(wins).forEach(win => {
+        const wNode = new BTAppNode(win.windowName, sessionNode.id, "", sessionNode.level + 1);
+        wNode.windowId = win.windowId;
+        win.tabs.reverse().forEach(tab => {
+            // Find or create node for tab
+            let tabNode = BTAppNode.findFromTab(tab.id);
+            if (!tabNode) {
+                tabNode = new BTAppNode(`[[${tab.url}][${tab.title}]]`, wNode.id, "", wNode.level + 1);
+                tabNode.createDisplayNode();
+            }
+            newTabNodes.push(tabNode);
+            tabNode.windowId = tab.windowId;
+            tabNode.tabId = tab.id;
+            tabNode.tabIndex = tab.tabIndex;
+            tabNode.faviconUrl = tab.faviconUrl;
+            setNodeOpen(tabNode);
+            if (closeP) tabNode.closeTab();
+        });
+        Object.values(win.tabGroups).reverse().forEach(tg => {
+            if (BTAppNode.findFromGroup(tg.id)) return;              // already managed
+            const tgNode = new BTAppNode(tg.title, wNode.id, "", wNode.level + 1);
+            tgNode.tabGroupId = tg.id;
+            tg.tabs.reverse().forEach(tab => {
+                let tabNode = BTAppNode.findFromTab(tab.id);
+                if (!tabNode) {
+                    tabNode = new BTAppNode(`[[${tab.url}][${tab.title}]]`, tgNode.id, "", tgNode.level + 1);
+                    tabNode.createDisplayNode();
+                }
+                newTabNodes.push(tabNode);
+                tabNode.windowId = win.windowId;
+                tabNode.tabGroupId = tg.id;
+                tabNode.tabId = tab.id;
+                tabNode.tabIndex = tab.tabIndex;
+                tabNode.faviconUrl = tab.faviconUrl;
+                setNodeOpen(tabNode);
+                if (closeP) tabNode.closeTab();
+            });
+            tabGroupUpdated({'tabGroupId': tg.id, 'tabGroupColor': tg.color,
+                             'tabGroupName': tg.title, 'tabGroupCollapsed': tg.collapsed});
+        });
+        wNode.createTabGroup();                         // since win is topic, create Tabgroup
+    });
+    
+    // save the hostname<->favicon mapping locally for Favicon feature.
+    try {
+        newTabNodes.forEach(n => {
+            const u = n.URL.split(/[?#]/)[0];             // remove any params
+            n.faviconUrl && localFileManager.set(u, n.faviconUrl);
+        });
+    }
+    catch (e) {
+        console.warn('URL/Favicon storage error: ', e);
+    };
+
+    processImport(sessionNode.id);
 }
 
 function loadBookmarkNode(node, parent) {
@@ -1532,22 +1699,23 @@ function loadBookmarkNode(node, parent) {
     });
 }
 
-function animateNewImport(name) {
+function animateNewImport(id) {
     // Helper for bookmark import, draw attention
-    const node = BTNode.findFromTitle(name);
+    const node = AllNodes[id];
     if (!node) return;
     const element = $(`tr[data-tt-id='${node.id}']`)[0];
+	element.scrollIntoView({block: 'center'});
+    /*
     $('html, body').animate({
         scrollTop: $(element).offset().top
     }, 750);
+*/
     $(element).addClass("attention",
                         {duration: 2000,
                          complete: function() {
                              $(element).removeClass("attention", 2000);
                          }});
-    RefreshCB = null;
 }
-
 
 function exportBookmarks() {
     // generate minimal AllNodes for background to operate on
@@ -1564,78 +1732,6 @@ function exportBookmarks() {
     setTimeout(() => window.postMessage({'function': 'exportBookmarks'}), 100);
     gtag('event', 'BookmarkExport', {'event_category': 'Export'});
 }
-
-
-function updatePrefs() {
-    // update prefrences based on data read into AllNodes.metaProperties
-
-    let groupMode = getMetaProp('BTGroupingMode');
-    if (groupMode) {
-        const $radio = $('#tabgroup_selector :radio[name=grouping]');
-
-        // v099 move away from have a WINDOW default, new window now a choice on opening
-        if (groupMode == 'WINDOW') {
-            groupMode = 'TABGROUP';
-            setMetaProp('BTGroupingMode', groupMode);
-        }            
-        
-        $radio.filter(`[value=${groupMode}]`).prop('checked', true);
-        GroupingMode = groupMode;
-        window.postMessage({'function': 'localStore', 'data': {'GroupingMode': GroupingMode}});
-	}
-
-    // does the topic manager live in a tab or a window?
-    const managerHome = getMetaProp('BTManagerHome');
-    if (managerHome) {
-        const $radio = $('#panel_toggle :radio[name=grouping2]');
-        $radio.filter(`[value=${managerHome}]`).prop('checked', true);
-        window.postMessage({'function': 'localStore', 'data': {'ManagerHome': managerHome}});
-    }
-
-    // Theme saved or set from OS
-    const theme = getMetaProp('BTTheme') ||
-          (window?.matchMedia('(prefers-color-scheme: dark)').matches ? 'DARK' : 'LIGHT');
-    const $radio = $('#theme_selector :radio[name=theme]');
-    $radio.filter(`[value=${theme}]`).prop('checked', true);
-    window.postMessage({'function': 'localStore', 'data': {'Theme': theme}});
-    // Change theme by setting attr on document which overides a set of vars. see top of bt.css
-    document.documentElement.setAttribute('data-theme', theme);
-}
-
-// Register listener for radio button changes in Options
-$(document).ready(function () {
-    if (typeof WaitingForKeys !== 'undefined') {
-        // Defined in btContentScript, so if undefined => some issue
-        alert("Something went wrong. The BrainTool app is not connected to its Browser Extension!");
-    }
-    $('#tabgroup_selector :radio').change(function () {
-        const oldVal = GroupingMode;
-        const newVal = $(this).val();
-        GroupingMode = newVal;
-        setMetaProp('BTGroupingMode', GroupingMode);
-        // Let extension know
-        window.postMessage({'function': 'localStore', 'data': {'GroupingMode': GroupingMode}});
-
-        saveBT();
-        groupingUpdate(oldVal, newVal);
-    });
-    $('#panel_toggle :radio').change(function () {
-        const newHome = $(this).val();
-        setMetaProp('BTManagerHome', newHome);
-        // Let extension know
-        window.postMessage({'function': 'localStore', 'data': {'ManagerHome': newHome}});
-        saveBT();
-        alert("NB you need to close and reopen the Topic Manager to change its location");
-    });
-    $('#theme_selector :radio').change(function () {
-        const newTheme = $(this).val();
-        setMetaProp('BTTheme', newTheme);
-        document.documentElement.setAttribute('data-theme', newTheme);
-        // Let extension know
-        window.postMessage({'function': 'localStore', 'data': {'Theme': newTheme}});
-        saveBT();
-    });
-});
 
 function groupingUpdate(from, to) {
     // grouping has been changed, potentially update open tabs (WINDOW->NONE is ignored)
@@ -1662,13 +1758,12 @@ $("#search_entry").on("focusout", disableSearch);
 $("#searchHint").on("click", enableSearch);
 function enableSearch(e) {
     // activate search mode
-
     // ignore if tabbed into search box from card editor
     const editing = ($($("#dialog")[0]).is(':visible'));
     if (editing) return;
     
     $("#search_entry").select();
-    $("#search_buttons").show();
+    $(".searchButton").show();
     $("#searchHint").hide();
 
     // Start search from...
@@ -1685,9 +1780,17 @@ function enableSearch(e) {
 function disableSearch(e = null) {
     // turn off search mode
     if (e && e.currentTarget == $("#search")[0]) return;     // don't if still in search div
+    // special handling if tabbed into search box from card editor to allow edit card tabbing
+    const editing = ($($("#dialog")[0]).is(':visible'));
+    if (editing) {
+        e.code = "Tab";
+        handleEditCardKeyup(e);
+        return;
+    }
+    
     $("#search_entry").removeClass('failed');
     $("#search_entry").val('');
-	$("#search_buttons").hide();
+	$(".searchButton").hide();
     $("#searchHint").show();
 
     // undo display of search hits
@@ -1872,14 +1975,16 @@ function extendedSearch(start, sstr, selectedNode) {
  ***/
 // prevent default space/arrow key scrolling and element tabbing on table (not in card edit fields)
 window.addEventListener("keydown", function(e) {
-    if ($("#dialog").find(':focus').length) return;
+    if ($($("#dialog")[0]).is(':visible')) {
+        // ignore keydown if card editing. keyup gets event
+        return;
+    }
     if ($("#search_entry").is(":focus")) return;
     if(["ArrowUp","ArrowDown","Space", "Tab", "Enter"].indexOf(e.code) > -1) {
         e.preventDefault();
     }
 
     // up/down nav here to allow for auto repeat
-    
     const alt = e.altKey;
     const code = e.code;
     const navKeys = ["KeyN", "KeyP", "ArrowUp", "ArrowDown"];
@@ -1906,7 +2011,6 @@ window.addEventListener("keydown", function(e) {
 	    e.stopPropagation();
         return;
     }
-
 }, false);
 
 $(document).on("keyup", keyUpHandler);
@@ -1933,6 +2037,9 @@ function keyUpHandler(e) {
         undo();
     }
 
+    // escape closes any open config/help/setting panel
+    if (code === "Escape") configManager.closeConfigDisplays();
+
     let next, currentSelection = $("tr.selected")[0];
     // Pageup/down move selection to top visible row, nb slight delay for scroll to finish
     if (currentSelection && (code == "PageUp" || code == "PageDown")) {
@@ -1952,7 +2059,12 @@ function keyUpHandler(e) {
 
     // h = help
     if (code == "KeyH") {
-        toggleHelp();
+        if ($('#help').is(':visible') && !$('#keyCommands').is(':visible')) {
+            configManager.toggleKeyCommands();
+        } else {
+            $('#keyCommands').show();
+            configManager.toggleHelpDisplay();
+        }
         e.preventDefault();
     }
 
@@ -1970,10 +2082,6 @@ function keyUpHandler(e) {
         });
 	    rememberFold();                                       // save to storage
     }
-
-    // close overlay on escape
-    if ((code === "Escape") && $("#controls_screen").is(":visible"))
-        toggleMenu();
 
     if (!currentSelection) return;
     const nodeId = $(currentSelection).attr('data-tt-id');
@@ -2105,6 +2213,7 @@ function handleEditCardKeyup(e) {
 		        $("#cancel").focus();
 	    }
         e.preventDefault();
+	    e.stopPropagation();
         return;
     }
     if (code == "Enter") {
@@ -2126,7 +2235,7 @@ function handleEditCardKeyup(e) {
         e.preventDefault();
         closeDialog(function () {editRow({type: 'internal', duration: 100});}, 100);        
     }
-    if (code === "Escape") closeDialog();         // escape out of edit
+    if (code === "Escape") closeDialog(cancelEdit);    // escape out of edit then check need 4 cancel
 };
 
 function undo() {
